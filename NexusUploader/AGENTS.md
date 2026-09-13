@@ -1,0 +1,33 @@
+# NexusUploader — calling task instructions
+
+Read this file and README.md completely before using the tool. This is a CLI for other Codex tasks, not a game mod.
+
+## Capabilities
+
+- `update-file` accepts a mod directory. It reads name/version from root modinfo.ini, generates ZIP bytes, and uses Nexus's documented v3 APIs to publish on an existing mod page. Zero active Main Files means create; one means add a version; multiple means stop.
+- `inspect --mod-id <global-v3-id> --config <known-path>` reads file/version history using GET only. It does not resolve site URLs or check account/ownership. Never substitute a game-scoped page ID for a global v3 modId.
+- `create-mod` and `update-info` are unsupported, returning `UNSUPPORTED_OPERATION` (exit 2) before credentials or network, including dry-run. Creating a Main File is not creating a mod page.
+- Only reliable APIs, official SDKs/CLIs and established programmatic integrations are allowed. Browser automation, computer-use, DOM/form manipulation, simulated input and their wrappers are prohibited. Never invent private endpoints or add a browser fallback.
+- The owner prohibited Nexus login or real publishing for development verification. Use the offline harness. Actual publishing requires authorization in the calling task's context.
+
+## Calling contract
+
+1. Share this checkout's compiled CLI and `.nexus-state/` across callers. Do not copy the tool to temporary directories or build concurrently with active publishing. Build once with `dotnet build NexusUploader/NexusUploader.csproj -c Release`, then call `pwsh -NoProfile -File <absolute-tool-directory>/nexus.ps1 ...`.
+2. Obtain the intended global `modId` and release source directory from the publishing task. Prepare the ready-to-install directory according to its own build/source/version rules. NexusUploader packages everything inside it, including modinfo.ini, without an extra wrapper folder. It does not compile source, modify INI, or automatically filter development/runtime files.
+3. Copy the request example. Required fields: `requestId`, `operation: update-file`, `modId`, `modDirectory`; optional fields: `description`, `changelog`. Paths inside the request resolve relative to that JSON, never the caller's CWD. Use a fresh UUID only for a new logical operation and retain it for reconciliation.
+4. Do not supply user IDs, expected names, URLs, file actions/IDs, archive paths, fileName, version, sha256 or schemaVersion. No legacy request compatibility exists. Version comes from modinfo.ini; ZIP name/hash and target file are automatic. Follow README's INI syntax and metadata limits.
+5. Run `update-file --request <request.json> --config <known-secret-path> --dry-run --plan <new-file.plan.json>`. Require exit 0 and `status: dry_run_ok`. Review normalized request, `target`, `package`, `intent` and `planSha256`. Dry-run creates a temporary ZIP and a persistent plan, sends only GET remotely, and deletes the temporary ZIP afterwards.
+6. Execute the same request with `--execute --plan <plan> --confirm <planSha256>`. The hash is a machine gate, not user authorization; rely on existing task authorization and do not ask again if already explicit. Plans expire after 15 minutes. Source bytes, metadata, paths, request or remote file state changes require a fresh dry-run; actions never silently switch under an old plan.
+7. Parse the single JSON document and exit code. Exit 4 means partial/uncertain remote state. Read the non-secret `.nexus-state/<requestId>.receipt.json`, use read-only inspection to reconcile and report the exact stage. Never blindly retry, delete receipts, generate a new UUID to bypass a failure, append duplicate changelogs or claim success based only on an upload session.
+
+## Credentials and publication semantics
+
+- The local credential path is `<absolute-tool-directory>/credentials.json`, ignored by Git. Its initial key is empty for the user to fill locally. A blank, non-secret template is committed as `examples/credentials.example.json`; never read an existing real config to initialize another one.
+- Never open, print, search, copy or commit updater.json, credentials.json, secret configuration, cookie/storage state files or browser profiles. Never enumerate neighboring files to discover credentials. Pass a known credential path directly to `--config`; only the tool reads NEXUSMODS_API_KEY internally. Existing reference Updater config can be referenced without copying; its mods mapping is ignored.
+- Never put API keys on the command line or in public metadata/source folders. Do not enable HTTP traces or dump raw exceptions/responses. Unknown/duplicate JSON fields are rejected.
+- All directory entries are packaged, including empty directories. Sensitive file names, Git/state directories, unsafe paths, case collisions, reparse points, >10,000 entries, >8 GiB or embedded credential patterns cause refusal. Known sensitive file names are rejected before their contents are read. This is not a universal secret detector; review release content.
+- INI is UTF-8, flat or [ModInfo], with one name and one version. See README for permitted characters and limits. ZIP generation needs only .NET; temporary files are deleted on close. No prebuilt archives are accepted.
+- An active Main File has is_active=true and at least one category=main version. Count distinct file groups, not versions. is_primary is not used to select a target. One Main File is updated even if an optional file is currently primary; zero Main Files creates one.
+- A new Main File uses the INI name; an update preserves the existing file group's display name. The upload filename comes from the INI name/version. All historical versions, including inactive files, are checked for duplicate versions case-insensitively.
+- Every upload becomes primary and sets the mod page version. The description field describes the uploaded file version, not the mod page; INI description is not implicitly published. Optional changelog text is appended only after the file is successfully published and read back, using the same INI version. Old files are not explicitly archived/deleted.
+- No account or ownership expectations are required. A successful read is not proof of write permission; Nexus determines authorization on write.

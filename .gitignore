@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+.local/
+**/.nexus-state/
+**/updater.json
+**/credentials.json
+**/*.secret.json
+**/.env
+**/.env.*
+!**/.env.example
+**/*.plan.json
+**/*.receipt.json
+**/*.handoff.json
+**/*.lock
