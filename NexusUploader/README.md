@@ -88,7 +88,7 @@ Main File 按**文件组**计数：`is_active=true` 且至少一个版本的 `ca
 
 `--config` 指向本地 JSON，工具内部只使用 `NEXUSMODS_API_KEY`。调用任务不得打开、打印、搜索或复制配置。可以传入已知的旧 Updater 配置路径，其他条目及其 `mods` 映射不会被使用。
 
-本地配置放在 `NexusUploader/credentials.json`，已被 Git 忽略；初始 `NEXUSMODS_API_KEY` 为空，由用户在本地填写。新 checkout 可根据 [空白配置模板](examples/credentials.example.json) 创建此文件，真实配置不得提交。
+本地配置放在 `NexusUploader/credentials.json`，已被 Git 忽略；初始 `NEXUSMODS_API_KEY` 为空，由用户在本地填写。新 checkout 可根据仓库根目录的 [空白配置模板](../credentials.example.json) 创建此文件，真实配置不得提交。
 
 ```powershell
 $tool = 'E:\MyWebsiteHelper\MyUploader\NexusUploader\nexus.ps1'
@@ -126,6 +126,7 @@ pwsh -NoProfile -File $tool update-file `
 - 打包期间持有源文件只读共享句柄，Windows 上禁止内容写入/删除；打包后复查目录结构。上传使用独立临时 ZIP 句柄，不依赖持续读取正在开发的源文件；上传按 128 KiB 缓冲分片流式读取。
 - API 与存储客户端隔离，存储不携带 API key，均禁用自动重定向。只接受 AWS/R2 的 HTTPS 存储地址。禁止输出原始 HTTP 错误、响应体、签名地址及凭据，不能启用 HTTP 调试日志。
 - 上传合并不仅检查 HTTP 200，还核验 S3 完成 XML。关联文件前再查远端状态，关联后读回主要版本，最后才写 changelog。
+- 更新文件时以发布响应的 `version.id` 定位新版本，读回目标 mod 的完整历史，核对它属于计划中的文件组且名称、版本、分类、主要下载状态均正确。写响应的 `file.id` 单独记为诊断字段，不用它直接判定文件组归属；读回归属错误仍返回 `PUBLISH_MISMATCH`，核验不通过不会写 changelog。
 - 没有自动网络重试。先持久化回执再发第一个写请求；文件发布与 changelog 不是原子事务，外部调用仍可能在最终检查后并发修改。
 
 | 退出码 | 含义 |
@@ -137,6 +138,8 @@ pwsh -NoProfile -File $tool update-file `
 | 130 | 写入前取消；写入开始后的取消返回 4 |
 
 回执位置：工具目录 `.nexus-state/<requestId>.receipt.json`。包含 status、stage、安全的 upload/file ID 和 errorCode，不含原始错误。`changelog` 失败时文件可能已成功，不能重传；`publish-file` 断线时即使没有收到 ID 也须核对。
+
+新回执还记录 `modId`、`targetFileId`（更新时的目标文件组）及 `responseFileId`（写响应中的 ID）。更新时 `publishedId` 是响应的 `version.id`，收到成功响应后先保存这些 ID，再做读回核验；核验失败会保留在 `verify-file` 阶段，便于只读排查。旧回执缺少这些字段时不能据此判断远端没有创建成功，也不能重传来复现响应。
 
 已尝试发布的 requestId 会被拒绝再次执行。不得删除回执、更换 requestId 或清空状态目录绕过防护。锁文件可以保留，活跃锁以系统句柄为准。沙箱 Schannel/TLS 错误应在沙箱外核实，不应据此判定凭据失效。
 

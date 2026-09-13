@@ -174,7 +174,7 @@ internal sealed class NexusApi : IDisposable
         return url!;
     }
 
-    public async Task<string> PublishAsync(Request request, PackageInfo package, FileIntent intent, string uploadId, CancellationToken ct)
+    public async Task<PublishResult> PublishAsync(Request request, PackageInfo package, FileIntent intent, string uploadId, CancellationToken ct)
     {
         var body = new Dictionary<string, object>
         {
@@ -187,9 +187,14 @@ internal sealed class NexusApi : IDisposable
         var result = await SendAsync(HttpMethod.Post, path, body, 201, ct);
         var id = intent.Action == "create" ? Text(result, "id") : Text(Property(result, "version"), "id");
         Guard.Id(id);
-        if (intent.Action == "update")
-            Guard.Require(Text(Property(result, "file"), "id") == intent.FileId, "PUBLISH_MISMATCH", "返回的文件与目标不符；请核对 Nexus，禁止重试。");
-        return id;
+        var responseFileId = intent.Action == "create" ? id : Text(Property(result, "file"), "id");
+        Guard.Id(responseFileId);
+        // The write response's UploadModFile.id is not a reliable update-chain identity.
+        // Keep it for diagnosis; Publisher must find the returned version.id in the target mod's
+        // complete history and verify its owning file group before allowing changelog writes.
+        var published = new PublishResult(id, responseFileId);
+        Guard.PublicText(Json.Serialize(published), key);
+        return published;
     }
 
     public async Task ChangelogAsync(Request request, string version, CancellationToken ct)

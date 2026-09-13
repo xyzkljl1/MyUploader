@@ -49,7 +49,7 @@ internal sealed class Journal : IDisposable
         var targetLock = Json.Hash(new { request.ModId });
         gate = new FileStream(Path.Combine(stateDirectory, targetLock + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         path = Path.Combine(stateDirectory, request.RequestId + ".receipt.json");
-        Current = new(request.RequestId, "not_started", "validated");
+        Current = new(request.RequestId, "not_started", "validated", ModId: request.ModId);
         try
         {
             Guard.Require(!File.Exists(path), "ALREADY_ATTEMPTED", "此 requestId 已尝试执行。请检查回执及 Nexus，禁止自动重试或换 ID 绕过。");
@@ -57,9 +57,12 @@ internal sealed class Journal : IDisposable
         catch { gate.Dispose(); throw; }
     }
 
-    public void Set(string status, string stage, string? uploadId = null, string? publishedId = null, string? errorCode = null)
+    public void Set(string status, string stage, string? uploadId = null, string? publishedId = null, string? errorCode = null,
+        string? targetFileId = null, string? responseFileId = null)
     {
-        Current = Current with { Status = status, Stage = stage, UploadId = uploadId ?? Current.UploadId, PublishedId = publishedId ?? Current.PublishedId, ErrorCode = errorCode };
+        Current = Current with { Status = status, Stage = stage, UploadId = uploadId ?? Current.UploadId,
+            PublishedId = publishedId ?? Current.PublishedId, ErrorCode = errorCode,
+            TargetFileId = targetFileId ?? Current.TargetFileId, ResponseFileId = responseFileId ?? Current.ResponseFileId };
         var temporary = path + ".tmp";
         using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
         {
@@ -83,7 +86,7 @@ internal static class Publisher
         var intent = Planner.Resolve(request, target, package.Info);
         Guard.Require(Planner.Fingerprint(request, target, package.Info, intent) == plan.Fingerprint, "REMOTE_CHANGED", "Nexus 文件状态已变化，必须重新 dry-run；不会静默切换创建/更新动作。");
         ct.ThrowIfCancellationRequested();
-        journal.Set("uncertain", "create-upload"); // Persist before the first side effect, including timeouts/cancellation.
+        journal.Set("uncertain", "create-upload", targetFileId: intent.FileId); // Persist before the first side effect, including timeouts/cancellation.
         try
         {
             var upload = await api.UploadAsync(package.Stream, package.Info.ArchiveName,
@@ -93,12 +96,9 @@ internal static class Publisher
             Guard.Require(Json.Hash(latest) == Json.Hash(target), "REMOTE_CHANGED", "上传期间 Nexus 状态变化；压缩包已上传但未关联文件，请先核对。");
             journal.Set("uncertain", "publish-file");
             var published = await api.PublishAsync(request, package.Info, intent, upload, ct);
-            journal.Set("partial", "verify-file", publishedId: published);
+            journal.Set("partial", "verify-file", publishedId: published.PublishedId, responseFileId: published.ResponseFileId);
             var files = await api.FilesAsync(request.ModId, ct);
-            var matches = files.SelectMany(f => f.Versions.Select(v => (File: f, Version: v)))
-                .Where(x => x.Version.Version == package.Info.Version && x.Version.IsPrimary && x.Version.Category == "main" && x.Version.Name == intent.Name).ToArray();
-            Guard.Require(matches.Length == 1 && (intent.Action == "create" ? matches[0].File.Id == published : matches[0].File.Id == intent.FileId && matches[0].Version.Id == published),
-                "VERIFY_FAILED", "Nexus 已返回创建成功，但读回核验未通过；禁止再次上传。");
+            VerifyPublished(files, package.Info, intent, published);
             journal.Set("partial", "changelog");
             await api.ChangelogAsync(request, package.Info.Version, ct);
             journal.Set("success", "complete");
@@ -114,5 +114,22 @@ internal static class Publisher
             catch { /* The last durable pre-write journal remains authoritative. Always report exit 4. */ }
             throw new SafeException("PARTIAL_OR_UNCERTAIN", "已开始远程写入，结果部分完成或不确定；查看 receipt 回执并核对 Nexus，禁止盲目重试。", 4);
         }
+    }
+
+    internal static void VerifyPublished(RemoteFile[] files, PackageInfo package, FileIntent intent, PublishResult published)
+    {
+        var history = files.SelectMany(f => f.Versions.Select(v => (File: f, Version: v))).ToArray();
+        if (intent.Action == "update")
+        {
+            // Verify identity before metadata. A matching label on another version is insufficient.
+            var created = history.Where(x => x.Version.Id == published.PublishedId).ToArray();
+            Guard.Require(created.Length == 1, "VERIFY_FAILED", "发布返回的版本 ID 未在目标 mod 中唯一找到；禁止再次上传。");
+            Guard.Require(created[0].File.Id == intent.FileId, "PUBLISH_MISMATCH", "读回发现新版本所属文件组与目标不符；请核对 Nexus，禁止重试。");
+        }
+        var matches = history.Where(x => x.Version.Version == package.Version && x.Version.IsPrimary &&
+            x.Version.Category == "main" && x.Version.Name == intent.Name && x.File.IsActive).ToArray();
+        Guard.Require(matches.Length == 1 && (intent.Action == "create" ? matches[0].File.Id == published.PublishedId :
+                matches[0].File.Id == intent.FileId && matches[0].Version.Id == published.PublishedId),
+                "VERIFY_FAILED", "Nexus 已返回创建成功，但读回核验未通过；禁止再次上传。");
     }
 }

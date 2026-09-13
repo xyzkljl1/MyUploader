@@ -158,6 +158,56 @@ internal static class Tests
                 var receipt = await Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, State(), default);
                 Check(receipt.Status == "success" && receipt.PublishedId == "100");
             });
+            await Run("different write-response file ID is reconciled by the returned version ID", async () =>
+            {
+                var (request, mock) = Setup(); mock.ResponseFileId = "900";
+                using var api = new NexusApi(Key, false, mock, new StorageMock());
+                var plan = await Planner.PrepareAsync(request, api, Key, default); var state = State();
+                var receipt = await Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, state, default);
+                Check(receipt.Status == "success" && receipt.PublishedId == "102" && receipt.ResponseFileId == "900");
+                Check(receipt.TargetFileId == "100" && receipt.ModId == "12345" && mock.ChangelogCalls == 1);
+                Check(Json.Hash(receipt) == Json.Hash(Json.Read<Receipt>(Path.Combine(state, request.RequestId + ".receipt.json"))));
+                var publishIndex = mock.Calls.FindIndex(c => c == ("POST", "/v3/mod-files/100/versions"));
+                var verifyIndex = mock.Calls.FindIndex(publishIndex + 1, c => c == ("GET", "/v3/mod-files/100/versions"));
+                var changelogIndex = mock.Calls.FindIndex(c => c == ("POST", "/v3/mods/12345/changelogs"));
+                Check(publishIndex >= 0 && verifyIndex > publishIndex && changelogIndex > verifyIndex);
+            });
+            await Run("matching response file ID cannot hide a version attached to the wrong group", async () =>
+            {
+                var (request, mock) = Setup(); mock.PublishedOwnerFileId = "200";
+                using var api = new NexusApi(Key, false, mock, new StorageMock());
+                var plan = await Planner.PrepareAsync(request, api, Key, default); var state = State();
+                await RejectAsync(() => Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, state, default), "PARTIAL_OR_UNCERTAIN");
+                var receipt = Json.Read<Receipt>(Path.Combine(state, request.RequestId + ".receipt.json"));
+                Check(receipt.Status == "partial" && receipt.Stage == "verify-file" && receipt.ErrorCode == "PUBLISH_MISMATCH");
+                Check(receipt.PublishedId == "102" && receipt.TargetFileId == "100" && receipt.ResponseFileId == "100" && mock.ChangelogCalls == 0);
+            });
+            await Run("failed read-back preserves response IDs and prevents changelog writes", async () =>
+            {
+                var (request, mock) = Setup(); mock.FailReadback = true; mock.ResponseFileId = "900";
+                using var api = new NexusApi(Key, false, mock, new StorageMock());
+                var plan = await Planner.PrepareAsync(request, api, Key, default); var state = State();
+                await RejectAsync(() => Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, state, default), "PARTIAL_OR_UNCERTAIN");
+                var receipt = Json.Read<Receipt>(Path.Combine(state, request.RequestId + ".receipt.json"));
+                Check(receipt.Status == "partial" && receipt.Stage == "verify-file" && receipt.ErrorCode == "API_HTTP_503");
+                Check(receipt.PublishedId == "102" && receipt.ResponseFileId == "900" && receipt.TargetFileId == "100" && mock.ChangelogCalls == 0);
+                Check(!Json.Serialize(receipt).Contains(Key));
+            });
+            await Run("read-back requires exact version identity, metadata and active primary state", async () =>
+            {
+                var (request, mock) = Setup();
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var plan = await Planner.PrepareAsync(request, api, Key, default);
+                var version = new FileVersion("102", plan.Intent.Name, plan.Package.Version, "main", true);
+                var file = new RemoteFile("100", plan.Intent.Name, true, [version]);
+                var published = new PublishResult("102", "900");
+                foreach (var invalid in new[] {
+                    version with { Id = "103" }, version with { Name = "Different" }, version with { Version = "3.0" },
+                    version with { Category = "optional" }, version with { IsPrimary = false } })
+                    Reject(() => Publisher.VerifyPublished([file with { Versions = [invalid] }], plan.Package, plan.Intent, published), "VERIFY_FAILED");
+                Reject(() => Publisher.VerifyPublished([file with { IsActive = false }], plan.Package, plan.Intent, published), "VERIFY_FAILED");
+                Reject(() => Publisher.VerifyPublished([file with { Versions = [version, version] }], plan.Package, plan.Intent, published), "VERIFY_FAILED");
+            });
             await Run("modified plan and expiration rejected", async () =>
             {
                 var (request, mock) = Setup();
@@ -377,8 +427,9 @@ internal static class Tests
     {
         public List<(string Method, string Path)> Calls { get; } = [];
         public string OldVersion = "1.0", UploadFilename = "", PublishedVersion = "", PublishedName = "";
+        public string ResponseFileId = "100", PublishedOwnerFileId = "100";
         public string? Description;
-        public bool Empty, Published, FailChangelog, CancelUpload, DriftAfterUpload;
+        public bool Empty, Published, FailChangelog, CancelUpload, DriftAfterUpload, FailReadback;
         public int ChangelogCalls;
         private long size;
         private const string UploadId = "11111111-2222-3333-4444-555555555555";
@@ -387,14 +438,25 @@ internal static class Tests
             Check(request.RequestUri!.Host == "api.nexusmods.com" && request.Headers.GetValues("apikey").Single() == Key);
             var path = request.RequestUri.AbsolutePath;
             Calls.Add((request.Method.Method, path));
-            if (path == "/v3/mods/12345/files") return Data(new { mod_files = Empty && !Published ? System.Array.Empty<object>() : new object[] { new { id = "100", name = "Test Mod", is_active = true, versions_count = Published && !Empty ? 2 : 1 } } });
+            if (path == "/v3/mods/12345/files")
+            {
+                if (Published && FailReadback) return Response(new { error = Key }, 503);
+                var files = new List<object>();
+                if (!Empty || Published)
+                    files.Add(new { id = "100", name = "Test Mod", is_active = true, versions_count = (Empty ? 0 : 1) + (Published && PublishedOwnerFileId == "100" ? 1 : 0) });
+                if (Published && PublishedOwnerFileId != "100")
+                    files.Add(new { id = PublishedOwnerFileId, name = "Other File", is_active = true, versions_count = 1 });
+                return Data(new { mod_files = files });
+            }
             if (path == "/v3/mod-files/100/versions" && request.Method == HttpMethod.Get)
             {
                 var versions = new List<object>();
                 if (!Empty) versions.Add(new { id = "101", file = new { id = "100" }, name = "Test Mod", version = OldVersion, category = "main", is_primary = !Published });
-                if (Published) versions.Add(new { id = "102", file = new { id = "100" }, name = PublishedName, version = PublishedVersion, category = "main", is_primary = true });
+                if (Published && PublishedOwnerFileId == "100") versions.Add(new { id = "102", file = new { id = "100" }, name = PublishedName, version = PublishedVersion, category = "main", is_primary = true });
                 return Data(new { versions });
             }
+            if (Published && PublishedOwnerFileId != "100" && path == $"/v3/mod-files/{PublishedOwnerFileId}/versions" && request.Method == HttpMethod.Get)
+                return Data(new { versions = new[] { new { id = "102", file = new { id = PublishedOwnerFileId }, name = PublishedName, version = PublishedVersion, category = "main", is_primary = true } } });
             if (path == "/v3/uploads/multipart")
             {
                 if (CancelUpload) throw new OperationCanceledException("fake exception with " + Key);
@@ -420,7 +482,7 @@ internal static class Tests
                 if (path == "/v3/mod-files") Check(Empty && body.RootElement.GetProperty("mod_id").GetString() == "12345");
                 else Check(!Empty && !body.RootElement.TryGetProperty("mod_id", out _));
                 Published = true;
-                return path == "/v3/mod-files" ? Data(new { id = "100" }, 201) : Data(new { file = new { id = "100" }, version = new { id = "102" } }, 201);
+                return path == "/v3/mod-files" ? Data(new { id = "100" }, 201) : Data(new { file = new { id = ResponseFileId }, version = new { id = "102" } }, 201);
             }
             if (path == "/v3/mods/12345/changelogs")
             {

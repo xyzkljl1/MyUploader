@@ -30,8 +30,10 @@ internal sealed record PackageInfo(string Name, string Version, string ArchiveNa
 internal sealed record FileIntent(string Action, string? FileId, string Name, string Category);
 internal sealed record Plan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
     Request Request, Target Target, PackageInfo Package, FileIntent Intent, string Fingerprint);
+internal sealed record PublishResult(string PublishedId, string ResponseFileId);
 internal sealed record Receipt(string RequestId, string Status, string Stage, string? UploadId = null,
-    string? PublishedId = null, string? ErrorCode = null);
+    string? PublishedId = null, string? ErrorCode = null, string? ModId = null, string? TargetFileId = null,
+    string? ResponseFileId = null);
 
 internal static class Json
 {
