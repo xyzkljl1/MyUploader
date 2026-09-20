@@ -75,7 +75,7 @@ struct Output<T: Serialize> {
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|_| {}));
-    let result = AssertUnwindSafe(run()).catch_unwind().await;
+    let result = AssertUnwindSafe(Box::pin(run())).catch_unwind().await;
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {

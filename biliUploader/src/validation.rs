@@ -182,7 +182,7 @@ pub fn fingerprint(path: &str, cover: bool) -> Result<MediaFingerprint, AppError
     }
     let mut file = File::open(path_ref).map_err(|_| invalid("media file cannot be opened"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let count = file
             .read(&mut buffer)
