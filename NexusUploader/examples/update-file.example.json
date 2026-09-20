@@ -1,7 +1,7 @@
 {
   "requestId": "REPLACE-WITH-NEW-UUID",
   "operation": "update-file",
-  "modId": "REPLACE-WITH-GLOBAL-V3-MOD-ID",
+  "target": "replace-with-registered-target",
   "modDirectory": "../release/ExampleMod",
   "description": "Release file description.",
   "changelog": "Describe the changes for this release."

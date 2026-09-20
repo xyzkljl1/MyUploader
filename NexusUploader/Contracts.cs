@@ -18,6 +18,7 @@ internal sealed record Request
     public string RequestId { get; init; } = "";
     public string Operation { get; init; } = "";
     public string ModId { get; init; } = "";
+    public string? Target { get; init; }
     public string ModDirectory { get; init; } = "";
     public string? Description { get; init; }
     public string? Changelog { get; init; }
@@ -26,6 +27,8 @@ internal sealed record Request
 internal sealed record FileVersion(string Id, string Name, string Version, string Category, bool IsPrimary);
 internal sealed record RemoteFile(string Id, string Name, bool IsActive, FileVersion[] Versions);
 internal sealed record Target(string ModId, RemoteFile[] Files);
+internal sealed record ModPageReference(string GameDomain, string GameScopedId);
+internal sealed record ModResolution(string GameDomain, string GameScopedId, string ModId, string GameId);
 internal sealed record PackageInfo(string Name, string Version, string ArchiveName, long SizeBytes, string Sha256, int FileCount);
 internal sealed record FileIntent(string Action, string? FileId, string Name, string Category);
 internal sealed record Plan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
@@ -101,6 +104,28 @@ internal static class Guard
     }
 
     public static void Id(string? value) => Require(value is not null && Regex.IsMatch(value, @"\A[1-9][0-9]{0,24}\z"), "ID", "ID 必须是正整数字符串，不可使用占位符或从页面 ID 猜测全局 ID。");
+    public static void TargetName(string? value) => Require(value is not null && Regex.IsMatch(value, @"\A[a-z0-9][a-z0-9._-]{0,63}\z", RegexOptions.CultureInvariant),
+        "TARGET_NAME", "target 名称必须为 1–64 个小写 ASCII 字母、数字、点、下划线或连字符，且以字母或数字开头。");
+    public static ModPageReference ModUrl(string? value)
+    {
+        Uri? url = null;
+        Require(value is not null && value.Length <= 2048 && value == value.Trim() &&
+            !value.Any(char.IsControl) && !value.Contains('\\') &&
+            Uri.TryCreate(value, UriKind.Absolute, out url),
+            "MOD_URL", "mod URL 格式无效。");
+        var suffixIndex = value!.IndexOfAny(['?', '#']);
+        var authorityAndPath = suffixIndex < 0 ? value : value[..suffixIndex];
+        Require(url!.Scheme == Uri.UriSchemeHttps && url.IsDefaultPort && url.UserInfo.Length == 0 &&
+            (url.IdnHost.Equals("nexusmods.com", StringComparison.OrdinalIgnoreCase) ||
+             url.IdnHost.Equals("www.nexusmods.com", StringComparison.OrdinalIgnoreCase)) &&
+            !authorityAndPath.Contains('%'),
+            "MOD_URL", "只接受 Nexus Mods 官方 HTTPS 页面 URL，且不允许用户信息、自定义端口或编码路径。");
+        var match = Regex.Match(url.AbsolutePath, @"\A/([a-zA-Z0-9_-]{1,100})/mods/([1-9][0-9]{0,24})/?\z", RegexOptions.CultureInvariant);
+        Require(match.Success, "MOD_URL", "URL 路径必须为 /<game-domain>/mods/<page-id>。");
+        var pageId = match.Groups[2].Value;
+        Id(pageId);
+        return new(match.Groups[1].Value.ToLowerInvariant(), pageId);
+    }
     public static void FileName(string value) => Require(Regex.IsMatch(value, @"\A[a-zA-Z0-9 _'().-]{1,50}\z") && value.Trim() == value && value.Any(char.IsLetterOrDigit),
         "FILE_NAME", "文件显示名称必须含字母或数字，长度为 1–50，且仅含 ASCII 字母、数字、空格、下划线、单引号、括号、点和连字符。");
     public static void Version(string value) => Require(Regex.IsMatch(value, @"\A[a-zA-Z0-9.-]{1,50}\z") && value.Any(char.IsLetterOrDigit),
@@ -121,6 +146,7 @@ internal static class Guard
             "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
         PublicText(Json.Serialize(request), apiKey);
         Id(request.ModId);
+        if (request.Target is not null) TargetName(request.Target);
         if (request.Description is not null) Text(request.Description, 50000, "DESCRIPTION");
         if (request.Changelog is not null) Text(request.Changelog, 50000, "CHANGELOG");
         Text(request.ModDirectory, 4096, "MOD_DIRECTORY");

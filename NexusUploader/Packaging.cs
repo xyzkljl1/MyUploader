@@ -126,7 +126,7 @@ internal static class Packaging
         {
             var value = piece.ToLowerInvariant();
             Guard.Require(value is not ".git" and not ".nexus-state", "PACKAGE_PATH", "文件夹包含 Git 或发布状态元数据。");
-            Guard.Require(!(value is "updater.json" or "config.json" or "credentials.json" or "cookies.json" ||
+            Guard.Require(!(value is "updater.json" or "config.json" or "modconfig.json" or "credentials.json" or "cookies.json" ||
                 value.StartsWith(".env") || value.Contains("storage-state") || value.EndsWith(".secret.json") ||
                 value.EndsWith(".pem") || value.EndsWith(".key")), "PACKAGE_SECRET", "文件夹包含敏感配置文件名；未读取该文件，禁止发布。");
         }

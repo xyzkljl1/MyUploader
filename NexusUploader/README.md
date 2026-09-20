@@ -6,7 +6,9 @@
 
 | 命令 | 功能 |
 | --- | --- |
-| `inspect` | 按全局 `modId` 读取文件及全部版本历史，只发送 GET |
+| `resolve` | 从 Nexus 官方 mod 页面 URL 解析全局 v3 `modId`，只发送 GET |
+| `target add/list/show` | 在 uploader 的 `modconfig.json` 中登记、列出或查看发布目标 |
+| `inspect` | 按全局 `modId`、官方页面 URL 或已登记 target 读取文件及全部版本历史，只发送 GET |
 | `update-file` | 打包文件夹、分片上传、自动创建/更新 Main File、同步页面版本，可追加 changelog |
 | `create-mod` / `update-info` | 当前不支持；立即返回 `UNSUPPORTED_OPERATION`，退出码 2 |
 
@@ -31,7 +33,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 {
   "requestId": "11111111-2222-4333-8444-555555555555",
   "operation": "update-file",
-  "modId": "12345",
+  "target": "example-mod",
   "modDirectory": "../release/ExampleMod",
   "description": "Release file description.",
   "changelog": "Describe the changes for this release."
@@ -44,12 +46,13 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | --- | --- | --- |
 | `requestId` | 是 | 本次逻辑发布的非空 UUID，用 `[guid]::NewGuid().ToString()` 生成。工具规范为小写；同一次操作保留同一个 ID，用于防止重复发布 |
 | `operation` | 是 | 固定为 `update-file` |
-| `modId` | 是 | Nexus **v3 全局 mod ID**，正整数字符串；不是 URL 中的游戏内页面 ID，不得直接互换或猜测 |
+| `target` | 二选一 | `modconfig.json` 中已经登记的稳定名称；推荐使用。名称为 1–64 个小写 ASCII 字母、数字、点、下划线或连字符，并以字母或数字开头 |
+| `modId` | 二选一 | Nexus **v3 全局 mod ID**，正整数字符串；不是 URL 中的游戏内页面 ID，不得直接互换或猜测。与 `target` 不能同时提供 |
 | `modDirectory` | 是 | 准备发布的本地文件夹；支持绝对路径，或相对**请求 JSON 所在目录**的路径。根目录必须包含 `modinfo.ini` |
 | `description` | 否 | 此次上传的**文件版本说明**，不修改 mod 页面正文；不从 INI 的 description 自动继承。省略或 null 时不发送此字段；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 | `changelog` | 否 | 文件发布并核验成功后，为 INI 版本号追加的 mod 更新日志；不会替换旧日志。省略或 null 时跳过此调用；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 
-不再接受用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行账号或所有者比对。
+`update-file` 请求 JSON 不接受用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；页面 URL 只用于下文的 `resolve`、`target add` 或 `inspect --mod-url` 命令。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行账号或所有者比对。
 
 ## 文件夹与 modinfo.ini
 
@@ -88,19 +91,33 @@ Main File 按**文件组**计数：`is_active=true` 且至少一个版本的 `ca
 
 工具默认自动读取自身目录的 `config.json`，内部只使用 `NEXUSMODS_API_KEY`。调用任务不得打开、打印、搜索或复制配置。特殊部署时可用 `--config` 覆盖默认路径；也可以传入已知的旧 Updater 配置路径，其他条目及其 `mods` 映射不会被使用。
 
-本地配置统一放在 `NexusUploader/config.json`，已被 Git 忽略；初始 `NEXUSMODS_API_KEY` 为空，由用户在本地填写。新 checkout 可根据同目录的 [空白配置模板](config.example.json) 创建此文件，真实配置不得提交。
+发布目标保存在与所选 `config.json` **同目录**的 `modconfig.json`。默认位置是 `NexusUploader/modconfig.json`；使用 `--config D:\secure\config.json` 时则使用 `D:\secure\modconfig.json`。两个真实配置均被 Git 忽略；模板 [config.example.json](config.example.json) 和 [modconfig.example.json](modconfig.example.json) 位于同一工具目录。`modconfig.json` 不含 API key 或原始 URL，但可能标识未公开 mod，因此同样不提交。
 
 ```powershell
 $tool = 'E:\MyWebsiteHelper\MyUploader\NexusUploader\nexus.ps1'
 
+pwsh -NoProfile -File $tool resolve --mod-url 'https://www.nexusmods.com/<game-domain>/mods/<page-id>'
+
+pwsh -NoProfile -File $tool target add --name 'example-mod' --mod-url 'https://www.nexusmods.com/<game-domain>/mods/<page-id>'
+pwsh -NoProfile -File $tool target list
+pwsh -NoProfile -File $tool target show --name 'example-mod'
+
 pwsh -NoProfile -File $tool inspect --mod-id '<global-mod-id>'
+
+pwsh -NoProfile -File $tool inspect --mod-url 'https://www.nexusmods.com/<game-domain>/mods/<page-id>'
+
+pwsh -NoProfile -File $tool inspect --target 'example-mod'
 
 pwsh -NoProfile -File $tool update-file `
   --request 'E:\MyRelease\release.json' `
   --dry-run --plan 'E:\MyRelease\release.plan.json'
 ```
 
-`inspect` 输出 `target.modId` 和文件/版本历史，不解析 URL，不查询账号或所有者。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。
+`resolve` 严格接受 `https://nexusmods.com/<game-domain>/mods/<page-id>` 或带 `www` 的官方地址，可带普通查询参数和片段；拒绝其他主机、HTTP、用户信息、自定义端口和编码路径。它从 URL 提取游戏域名及游戏内页面 ID，通过 Nexus 官方 v3 `getMod` 接口取得全局 ID，并输出 `resolution.modId`。该官方接口当前标记为 Experimental；工具会校验响应中的 `game_scoped_id` 与 URL 一致，不会把页面 ID 当成全局 ID。
+
+`target add` 执行同样的官方解析，然后以本地互斥锁和原子替换写入 `modconfig.json`；只保存名称、游戏域名、页面 ID、全局 modId、游戏 ID 和验证时间，不保存原始 URL/查询参数。名称或全局 ID 已存在时拒绝覆盖。`target list/show` 只读取 `modconfig.json`，不读取 API key，也不访问网络。
+
+`inspect` 可接受全局 `--mod-id`、`--mod-url` 或 `--target`，三者必须且只能选择一个。输出 `target.modId` 和文件/版本历史，使用 URL 时还输出不含原始 URL/查询参数的 `resolution`。这些操作不查询账号或所有者。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。
 
 dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容及拟发布的 description/changelog。远端传输层仅允许 GET，不创建上传会话、不上传文件。
 
@@ -116,11 +133,11 @@ pwsh -NoProfile -File $tool update-file `
 
 `--confirm` 核对 dry-run 计划摘要，不是要求调用方计算压缩包摘要，也不代替发布授权。没有交互提示、默认执行模式、`--yes` 或 `--force`。
 
-执行会重新读取 INI、重新打包并比较计划中的包信息。修改、增加、删除或重命名源文件，改版本，改请求，或远端文件历史变化，都必须重新 dry-run。工具对每个 modId 使用同一安装目录中的互斥锁，所有调用任务应共用该目录。
+使用 `target` 时，dry-run 会把 target 名称及当时解析出的全局 `modId` 一并写入计划。执行前重新读取 `modconfig.json`；如果名称改为另一个 modId，请求与计划将不匹配并停止。执行还会重新读取 INI、重新打包并比较计划中的包信息。修改、增加、删除或重命名源文件，改版本，改请求，或远端文件历史变化，都必须重新 dry-run。工具对每个 modId 使用同一安装目录中的互斥锁，所有调用任务应共用该目录。
 
 ## 防护与失败处理
 
-- 打包前先检查完整文件名清单，拒绝 Git/发布状态元数据、`updater.json`、`config.json`、`credentials.json`、`cookies.json`、`.env*`、storage-state、`*.secret.json`、PEM/key 等敏感路径，遇到这些文件名不读取内容、不静默排除后继续发布。
+- 打包前先检查完整文件名清单，拒绝 Git/发布状态元数据、`updater.json`、`config.json`、`modconfig.json`、`credentials.json`、`cookies.json`、`.env*`、storage-state、`*.secret.json`、PEM/key 等敏感路径，遇到这些文件名不读取内容、不静默排除后继续发布。
 - 拒绝路径穿越、大小写路径冲突、符号链接、目录联接及父路径重解析点。最多 10,000 条目、8 GiB 源内容。每个文件流式扫描配置 key 及 `NEXUSMODS_API_KEY` 的 UTF-8/UTF-16 特征。不能识别所有未知秘密或嵌套压缩内容，源文件夹仍须由调用项目审核。
 - 打包期间持有源文件只读共享句柄，Windows 上禁止内容写入/删除；打包后复查目录结构。上传使用独立临时 ZIP 句柄，不依赖持续读取正在开发的源文件；上传按 128 KiB 缓冲分片流式读取。
 - API 与存储客户端隔离，存储不携带 API key，均禁用自动重定向。只接受 AWS/R2 的 HTTPS 存储地址。禁止输出原始 HTTP 错误、响应体、签名地址及凭据，不能启用 HTTP 调试日志。
@@ -130,7 +147,7 @@ pwsh -NoProfile -File $tool update-file `
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 成功：`dry_run_ok` / `inspected` / `success` |
+| 0 | 成功：`resolved` / `added` / `listed` / `shown` / `dry_run_ok` / `inspected` / `success` |
 | 2 | 输入、校验或不支持的操作；修正具体问题，不能绕过防护 |
 | 3 | 网络/API/环境错误；仅在确认未开始写入后排查 |
 | 4 | 部分完成或结果不确定，核对回执及远端，禁止直接重试 |

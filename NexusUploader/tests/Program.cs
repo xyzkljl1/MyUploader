@@ -25,6 +25,18 @@ internal static class Tests
                 Reject(() => App.Parse(["inspect", "--apikey", Key]), "CLI");
                 var inspect = App.Parse(["inspect", "--mod-id", "12345"]);
                 Check(!inspect.Flags.ContainsKey("--config"));
+                var inspectUrl = App.Parse(["inspect", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
+                Check(inspectUrl.Flags.ContainsKey("--mod-url"));
+                var resolve = App.Parse(["resolve", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
+                Check(resolve.Command == "resolve");
+                var targetAdd = App.Parse(["target", "add", "--name", "fixture-mod", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
+                Check(targetAdd.Command == "target-add");
+                Check(App.Parse(["target", "list"]).Command == "target-list");
+                Check(App.Parse(["target", "show", "--name", "fixture-mod"]).Command == "target-show");
+                Check(App.Parse(["inspect", "--target", "fixture-mod"]).Flags["--target"] == "fixture-mod");
+                Reject(() => App.Parse(["inspect", "--mod-id", "1", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
+                Reject(() => App.Parse(["inspect", "--mod-id", "1", "--target", "fixture-mod"]), "CLI");
+                Reject(() => App.Parse(["inspect"]), "CLI");
                 var update = App.Parse(["update-file", "--request", "r", "--dry-run", "--plan", "p"]);
                 Check(!update.Flags.ContainsKey("--config"));
                 Check(Path.GetFileName(App.DefaultConfigPath()) == "config.json");
@@ -46,6 +58,50 @@ internal static class Tests
                 Reject(() => NexusApi.StorageUrl("https://bucket.s3.amazonaws.com:8443/a"), "STORAGE_HOST");
                 return Task.CompletedTask;
             });
+            await Run("official mod URLs resolve to global IDs with read-only API calls", async () =>
+            {
+                var page = Guard.ModUrl("https://www.nexusmods.com/SkyrimSpecialEdition/mods/12604?tab=files#content");
+                Check(page.GameDomain == "skyrimspecialedition" && page.GameScopedId == "12604");
+                foreach (var value in new[] {
+                    "http://www.nexusmods.com/game/mods/1",
+                    "https://nexusmods.com.evil.test/game/mods/1",
+                    "https://user@nexusmods.com/game/mods/1",
+                    "https://nexusmods.com:8443/game/mods/1",
+                    "https://nexusmods.com/game/mods/0",
+                    "https://nexusmods.com/game/files/1",
+                    "https://nexusmods.com/game/mods/%31" })
+                    Reject(() => Guard.ModUrl(value), "MOD_URL");
+                var mock = new ApiMock();
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var result = await api.ResolveAsync(page, default);
+                Check(result.ModId == "12345" && result.GameId == "1704" && result.GameScopedId == "12604");
+                Check(mock.Calls.Single() == ("GET", "/v3/games/skyrimspecialedition/mods/12604"));
+            });
+            await Run("central modconfig stores and binds verified publishing targets", async () =>
+            {
+                var directory = State();
+                var configPath = Path.Combine(directory, "config.json");
+                var registryPath = ModRegistry.PathForConfig(configPath);
+                Check(registryPath == Path.Combine(directory, "modconfig.json"));
+                var resolution = new ModResolution("skyrimspecialedition", "12604", "12345", "1704");
+                var added = ModRegistry.Add(registryPath, "fixture-mod", resolution);
+                Check(added.ModId == "12345" && File.Exists(registryPath));
+                var stored = ModRegistry.Find(registryPath, "fixture-mod");
+                Check(stored.GameScopedId == "12604" && stored.GameDomain == "skyrimspecialedition");
+                var (baseRequest, mock) = Setup();
+                var raw = baseRequest with { ModId = "", Target = "fixture-mod" };
+                var bound = Guard.Validate(ModRegistry.Bind(raw, registryPath), "update-file", root, Key);
+                Check(bound.Target == "fixture-mod" && bound.ModId == "12345");
+                Reject(() => ModRegistry.Bind(baseRequest with { Target = "fixture-mod" }, registryPath), "REQUEST_TARGET");
+                Reject(() => ModRegistry.Add(registryPath, "fixture-mod", resolution), "TARGET_EXISTS");
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var plan = await Planner.PrepareAsync(bound, api, Key, default);
+                var changed = new ModConfig { Targets = [stored with { ModId = "54321", VerifiedAt = DateTimeOffset.UtcNow }] };
+                File.WriteAllText(registryPath, Json.Serialize(changed));
+                var rebound = Guard.Validate(ModRegistry.Bind(raw, registryPath), "update-file", root, Key);
+                Reject(() => Planner.CheckPlan(plan, rebound, Json.Hash(plan)), "PLAN_MISMATCH");
+                Check(!File.ReadAllText(registryPath).Contains(Key) && !File.ReadAllText(registryPath).Contains("tab=files"));
+            });
             await Run("sensitive paths are rejected before reading and keys across buffers are rejected", async () =>
             {
                 var (request, _) = Setup();
@@ -58,7 +114,7 @@ internal static class Tests
                     File.WriteAllBytes(Path.Combine(request.ModDirectory, "mod.lua"), encoding.GetBytes(new string('x', 128 * 1024 - 10) + Key));
                     await RejectAsync(() => Packaging.BuildAsync(request.ModDirectory, Key, default), "PACKAGE_SECRET");
                 }
-                foreach (var name in new[] { "config.json", "credentials.json", "nested/.env", "nested/storage-state.json", "nested/token.secret.json", "private.pem", "private.key" })
+                foreach (var name in new[] { "config.json", "modconfig.json", "credentials.json", "nested/.env", "nested/storage-state.json", "nested/token.secret.json", "private.pem", "private.key" })
                     Reject(() => Packaging.CheckName(name), "PACKAGE_SECRET");
                 Reject(() => Packaging.CheckName("../mod.lua"), "PACKAGE_PATH");
                 Reject(() => Packaging.CheckName(".GIT/config"), "PACKAGE_PATH");
@@ -380,7 +436,7 @@ internal static class Tests
             {
                 Reject(() => App.Parse(["update-file", "--session", "unused"]), "CLI");
                 Reject(() => App.Parse(["update-file", "--site-profile", "unused"]), "CLI");
-                Reject(() => App.Parse(["inspect", "--mod-url", "unused"]), "CLI");
+                Reject(() => App.Parse(["update-file", "--mod-url", "unused"]), "CLI");
                 Reject(() => App.Parse(["inspect", "--expected-user-id", "unused"]), "CLI");
                 foreach (var field in new[] { "schemaVersion", "expectedUserId", "expectedModName", "expectedModId", "modUrl", "fileAction", "fileId", "archive", "archiveSha256", "fileName", "version", "sha256" })
                 {
@@ -443,6 +499,8 @@ internal static class Tests
             Check(request.RequestUri!.Host == "api.nexusmods.com" && request.Headers.GetValues("apikey").Single() == Key);
             var path = request.RequestUri.AbsolutePath;
             Calls.Add((request.Method.Method, path));
+            if (path == "/v3/games/skyrimspecialedition/mods/12604" && request.Method == HttpMethod.Get)
+                return Data(new { id = "12345", game_scoped_id = "12604", game_id = "1704", name = "Fixture Mod" });
             if (path == "/v3/mods/12345/files")
             {
                 if (Published && FailReadback) return Response(new { error = Key }, 503);

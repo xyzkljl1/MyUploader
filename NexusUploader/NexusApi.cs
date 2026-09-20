@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 namespace NexusUploader;
@@ -83,6 +84,26 @@ internal sealed class NexusApi : IDisposable
         var target = new Target(modId, await FilesAsync(modId, ct));
         Guard.PublicText(Json.Serialize(target), key);
         return target;
+    }
+
+    public async Task<ModResolution> ResolveAsync(ModPageReference page, CancellationToken ct)
+    {
+        Guard.Require(Regex.IsMatch(page.GameDomain, @"\A[a-z0-9_-]{1,100}\z", RegexOptions.CultureInvariant),
+            "MOD_URL", "游戏域名格式无效。");
+        Guard.Id(page.GameScopedId);
+        var data = await SendAsync(HttpMethod.Get,
+            $"games/{page.GameDomain}/mods/{page.GameScopedId}", null, 200, ct);
+        var modId = Text(data, "id");
+        var scopedId = Text(data, "game_scoped_id");
+        var gameId = Text(data, "game_id");
+        Guard.Id(modId);
+        Guard.Id(scopedId);
+        Guard.Id(gameId);
+        Guard.Require(scopedId == page.GameScopedId, "MOD_RESOLVE_MISMATCH",
+            "Nexus 返回的页面 ID 与 URL 不一致；已停止。");
+        var resolution = new ModResolution(page.GameDomain, scopedId, modId, gameId);
+        Guard.PublicText(Json.Serialize(resolution), key);
+        return resolution;
     }
     public async Task<RemoteFile[]> FilesAsync(string modId, CancellationToken ct)
     {
