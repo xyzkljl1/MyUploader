@@ -1,0 +1,15 @@
+{
+  "operation": "set-chapters",
+  "requestId": "44444444-5555-4666-8777-888888888888",
+  "bvid": "BV1xxxxxxxxx",
+  "chapters": [
+    {
+      "startSeconds": 0,
+      "title": "Introduction"
+    },
+    {
+      "startSeconds": 60,
+      "title": "Main section"
+    }
+  ]
+}

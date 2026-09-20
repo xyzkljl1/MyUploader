@@ -1,0 +1,9 @@
+{
+  "operation": "update-video",
+  "requestId": "22222222-3333-4444-8555-666666666666",
+  "bvid": "BV1xxxxxxxxx",
+  "videoPath": "../media/replacement.mp4",
+  "cid": 123456789,
+  "partTitle": "Updated video",
+  "visibility": "self-only"
+}

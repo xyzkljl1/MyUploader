@@ -1,0 +1,10 @@
+{
+  "operation": "update-info",
+  "requestId": "33333333-4444-4555-8666-777777777777",
+  "bvid": "BV1xxxxxxxxx",
+  "title": "Updated title",
+  "description": "Updated description",
+  "tags": ["example", "updated"],
+  "categoryId": 17,
+  "visibility": "self-only"
+}

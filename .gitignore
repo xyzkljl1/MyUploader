@@ -1,9 +1,12 @@
 **/bin/
 **/obj/
+**/target/
 .local/
 **/.nexus-state/
+**/.bili-state/
 **/updater.json
 **/credentials.json
+**/config.json
 **/*.secret.json
 **/.env
 **/.env.*
@@ -12,3 +15,4 @@
 **/*.receipt.json
 **/*.handoff.json
 **/*.lock
+!**/Cargo.lock

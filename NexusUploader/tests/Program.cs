@@ -23,6 +23,11 @@ internal static class Tests
                 Reject(() => App.Parse(["update-file", "--config", "x", "--request", "r", "--plan", "p"]), "CLI_MODE");
                 Reject(() => App.Parse(["update-file", "--config", "x", "--config", "y"]), "CLI_DUPLICATE");
                 Reject(() => App.Parse(["inspect", "--apikey", Key]), "CLI");
+                var inspect = App.Parse(["inspect", "--mod-id", "12345"]);
+                Check(!inspect.Flags.ContainsKey("--config"));
+                var update = App.Parse(["update-file", "--request", "r", "--dry-run", "--plan", "p"]);
+                Check(!update.Flags.ContainsKey("--config"));
+                Check(Path.GetFileName(App.DefaultConfigPath()) == "config.json");
                 Reject(() => Json.Parse<Request>("{\"modId\":\"1\",\"ModId\":\"2\"}"), "DUPLICATE_JSON");
                 try { Json.Parse<Request>("{\"typo\":1}"); throw new Exception(); } catch (JsonException) { }
                 return Task.CompletedTask;
@@ -53,7 +58,7 @@ internal static class Tests
                     File.WriteAllBytes(Path.Combine(request.ModDirectory, "mod.lua"), encoding.GetBytes(new string('x', 128 * 1024 - 10) + Key));
                     await RejectAsync(() => Packaging.BuildAsync(request.ModDirectory, Key, default), "PACKAGE_SECRET");
                 }
-                foreach (var name in new[] { "credentials.json", "nested/.env", "nested/storage-state.json", "nested/token.secret.json", "private.pem", "private.key" })
+                foreach (var name in new[] { "config.json", "credentials.json", "nested/.env", "nested/storage-state.json", "nested/token.secret.json", "private.pem", "private.key" })
                     Reject(() => Packaging.CheckName(name), "PACKAGE_SECRET");
                 Reject(() => Packaging.CheckName("../mod.lua"), "PACKAGE_PATH");
                 Reject(() => Packaging.CheckName(".GIT/config"), "PACKAGE_PATH");

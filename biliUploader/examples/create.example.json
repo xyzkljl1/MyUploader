@@ -1,0 +1,13 @@
+{
+  "operation": "create",
+  "requestId": "11111111-2222-4333-8444-555555555555",
+  "videoPath": "../media/example.mp4",
+  "title": "Example video",
+  "description": "Example description",
+  "tags": ["example", "game"],
+  "categoryId": 17,
+  "copyright": "original",
+  "visibility": "self-only",
+  "coverPath": "../media/cover.jpg",
+  "partTitle": "Main video"
+}

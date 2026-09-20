@@ -54,7 +54,6 @@ internal static class Program
         var allowed = command == "inspect" ? new[] { "--mod-id", "--config" } :
             new[] { "--request", "--config", "--plan", "--confirm", "--dry-run", "--execute" };
         Guard.Require(flags.Keys.All(allowed.Contains), "CLI", "命令包含不适用的参数。");
-        Required(flags, "--config");
         if (command != "inspect")
         {
             Required(flags, "--request"); Required(flags, "--plan");
@@ -82,6 +81,17 @@ internal static class Program
         return Path.Combine(AppContext.BaseDirectory, ".nexus-state");
     }
 
+    internal static string DefaultConfigPath()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "NexusUploader.csproj"))) return Path.Combine(directory.FullName, "config.json");
+            directory = directory.Parent;
+        }
+        return Path.Combine(AppContext.BaseDirectory, "config.json");
+    }
+
     internal static async Task<int> RunAsync(string[] args, CancellationToken ct)
     {
         if (args.Length == 0 || args is ["--help"] or ["-h"])
@@ -90,9 +100,9 @@ internal static class Program
                 NexusUploader 1.0 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
-                inspect --mod-id <global Nexus v3 ID> --config <secret JSON>
-                update-file --request <JSON> --config <secret JSON> --dry-run --plan <new *.plan.json>
-                update-file --request <same JSON> --config <secret JSON> --execute --plan <plan> --confirm <planSha256>
+                inspect --mod-id <global Nexus v3 ID>
+                update-file --request <JSON> --dry-run --plan <new *.plan.json>
+                update-file --request <same JSON> --execute --plan <plan> --confirm <planSha256>
                 create-mod / update-info: unsupported until a reliable API integration is available (exit 2).
 
                 Request: requestId, operation=update-file, modId, modDirectory; optional description/changelog.
@@ -107,7 +117,7 @@ internal static class Program
             return 0;
         }
         var (command, flags) = Parse(args);
-        var credentials = Credentials.Load(flags["--config"]);
+        var credentials = Credentials.Load(flags.GetValueOrDefault("--config") ?? DefaultConfigPath());
         if (command == "inspect")
         {
             Guard.Id(flags["--mod-id"]);

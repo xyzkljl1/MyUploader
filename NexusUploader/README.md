@@ -86,18 +86,17 @@ Main File 按**文件组**计数：`is_active=true` 且至少一个版本的 `ca
 
 ## 凭据与调用流程
 
-`--config` 指向本地 JSON，工具内部只使用 `NEXUSMODS_API_KEY`。调用任务不得打开、打印、搜索或复制配置。可以传入已知的旧 Updater 配置路径，其他条目及其 `mods` 映射不会被使用。
+工具默认自动读取自身目录的 `config.json`，内部只使用 `NEXUSMODS_API_KEY`。调用任务不得打开、打印、搜索或复制配置。特殊部署时可用 `--config` 覆盖默认路径；也可以传入已知的旧 Updater 配置路径，其他条目及其 `mods` 映射不会被使用。
 
-本地配置放在 `NexusUploader/credentials.json`，已被 Git 忽略；初始 `NEXUSMODS_API_KEY` 为空，由用户在本地填写。新 checkout 可根据仓库根目录的 [空白配置模板](../credentials.example.json) 创建此文件，真实配置不得提交。
+本地配置统一放在 `NexusUploader/config.json`，已被 Git 忽略；初始 `NEXUSMODS_API_KEY` 为空，由用户在本地填写。新 checkout 可根据同目录的 [空白配置模板](config.example.json) 创建此文件，真实配置不得提交。
 
 ```powershell
 $tool = 'E:\MyWebsiteHelper\MyUploader\NexusUploader\nexus.ps1'
-$credentialPath = 'E:\MyWebsiteHelper\MyUploader\NexusUploader\credentials.json'
 
-pwsh -NoProfile -File $tool inspect --mod-id '<global-mod-id>' --config $credentialPath
+pwsh -NoProfile -File $tool inspect --mod-id '<global-mod-id>'
 
 pwsh -NoProfile -File $tool update-file `
-  --request 'E:\MyRelease\release.json' --config $credentialPath `
+  --request 'E:\MyRelease\release.json' `
   --dry-run --plan 'E:\MyRelease\release.plan.json'
 ```
 
@@ -111,7 +110,7 @@ dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。
 
 ```powershell
 pwsh -NoProfile -File $tool update-file `
-  --request 'E:\MyRelease\release.json' --config $credentialPath `
+  --request 'E:\MyRelease\release.json' `
   --execute --plan 'E:\MyRelease\release.plan.json' --confirm '<planSha256>'
 ```
 
@@ -121,7 +120,7 @@ pwsh -NoProfile -File $tool update-file `
 
 ## 防护与失败处理
 
-- 打包前先检查完整文件名清单，拒绝 Git/发布状态元数据、`updater.json`、`credentials.json`、`cookies.json`、`.env*`、storage-state、`*.secret.json`、PEM/key 等敏感路径，遇到这些文件名不读取内容、不静默排除后继续发布。
+- 打包前先检查完整文件名清单，拒绝 Git/发布状态元数据、`updater.json`、`config.json`、`credentials.json`、`cookies.json`、`.env*`、storage-state、`*.secret.json`、PEM/key 等敏感路径，遇到这些文件名不读取内容、不静默排除后继续发布。
 - 拒绝路径穿越、大小写路径冲突、符号链接、目录联接及父路径重解析点。最多 10,000 条目、8 GiB 源内容。每个文件流式扫描配置 key 及 `NEXUSMODS_API_KEY` 的 UTF-8/UTF-16 特征。不能识别所有未知秘密或嵌套压缩内容，源文件夹仍须由调用项目审核。
 - 打包期间持有源文件只读共享句柄，Windows 上禁止内容写入/删除；打包后复查目录结构。上传使用独立临时 ZIP 句柄，不依赖持续读取正在开发的源文件；上传按 128 KiB 缓冲分片流式读取。
 - API 与存储客户端隔离，存储不携带 API key，均禁用自动重定向。只接受 AWS/R2 的 HTTPS 存储地址。禁止输出原始 HTTP 错误、响应体、签名地址及凭据，不能启用 HTTP 调试日志。
