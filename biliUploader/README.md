@@ -95,6 +95,8 @@ pwsh -NoProfile -File $tool create `
 
 `update-video` 和 `update-info` 使用相同流程，只需替换子命令。dry-run 对更新操作发送只读查询；它不会上传视频、封面或提交修改。计划会明确显示目标可见性。计划有效期为 15 分钟，执行前会重新计算本地文件摘要并重新读取远端稿件；提交后还会回读并校验可见性。
 
+媒体路径规范化时只检查类型、扩展名和大小，dry-run 与 execute 各完整读取一次媒体来计算或复核 SHA-256。execute 在摘要复核前取得媒体保护句柄并持有到上传结束；Windows 上同时禁止其他进程写入、删除或替换计划中的视频和封面。
+
 ## 状态与错误
 
 回执保存在可执行文件旁的 `.bili-state/<requestId>.receipt.json`。写操作开始前先落盘；已经有回执的 requestId 不允许再次执行。所有发布共用系统文件锁，避免多个任务并发上传。
@@ -111,6 +113,7 @@ pwsh -NoProfile -File $tool create `
 
 ```powershell
 cargo test --manifest-path .\biliUploader\Cargo.toml
+cargo audit --file .\biliUploader\Cargo.lock --ignore RUSTSEC-2023-0071
 ```
 
-测试只使用合成本地文件和合成 API 数据，不访问 Bilibili，不读取真实凭据。
+测试只使用合成本地文件和合成 API 数据，不访问 Bilibili，不读取真实凭据。`rsa` 审计例外的不可达性及约束记录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

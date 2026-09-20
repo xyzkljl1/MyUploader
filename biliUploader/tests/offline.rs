@@ -1,6 +1,8 @@
-use bili_uploader::backend::snapshot_from_value;
+use bili_uploader::backend::{
+    ensure_credential_target_safe, open_credentials, snapshot_from_value,
+};
 use bili_uploader::model::{Chapter, Copyright, PartSnapshot, RemoteSnapshot, Request, Visibility};
-use bili_uploader::plan::{envelope, select_part};
+use bili_uploader::plan::{envelope, read_and_verify, select_part};
 use bili_uploader::validation::{validate_and_normalize, validate_bvid};
 use serde_json::json;
 use std::fs;
@@ -220,4 +222,25 @@ fn parses_visibility_for_create_and_update() {
             ..
         }
     ));
+}
+
+#[test]
+fn oversized_plan_and_credentials_are_rejected_before_parsing() {
+    let root = std::env::temp_dir().join(format!("bili-uploader-limits-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+
+    let plan = root.join("oversized.plan.json");
+    let plan_file = fs::File::create(&plan).unwrap();
+    plan_file.set_len(4 * 1024 * 1024 + 1).unwrap();
+    let plan_error = read_and_verify(&plan, "unused").err().unwrap();
+    assert_eq!(plan_error.exit_code, 2);
+
+    let credentials = root.join("config.json");
+    let credential_file = fs::File::create(&credentials).unwrap();
+    credential_file.set_len(1024 * 1024 + 1).unwrap();
+    let credential_error = open_credentials(&credentials).err().unwrap();
+    assert_eq!(credential_error.exit_code, 3);
+    assert!(ensure_credential_target_safe(&root).is_err());
+
+    fs::remove_dir_all(root).unwrap();
 }

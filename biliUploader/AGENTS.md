@@ -11,6 +11,7 @@ Read this file and README.md completely before using the tool.
 - Never put cookie or token values on a command line. Do not enable HTTP/Rust trace logging or print raw upstream errors.
 - Do not use browser automation, computer-use, DOM manipulation or simulated input for any Bilibili operation.
 - Do not perform real development uploads. Unit and integration tests use synthetic local data and synthetic response objects.
+- RustSec RUSTSEC-2023-0071 is an explicit, documented exception only because the affected RSA private-key path belongs to biliup password login, while this tool exposes QR login and never calls `login_by_password`. Read `THIRD_PARTY_NOTICES.md`; never add password login without re-evaluating it.
 - `set-chapters` is deliberately unsupported because pinned biliup v1.2.2 exposes no reliable native chapter-write interface. A request containing `chapters` fails before credentials or media are read. Do not translate chapters into description timestamps and call that native chapters.
 
 ## Calling flow

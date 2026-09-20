@@ -9,11 +9,20 @@ use futures::StreamExt;
 use serde_json::Value;
 use std::path::Path;
 
+const MAX_CREDENTIAL_BYTES: u64 = 1024 * 1024;
+
 pub fn open_credentials(path: &Path) -> Result<BiliBili, AppError> {
-    if !path.is_file() {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        AppError::environment(ErrorCode::CredentialError, "credential file does not exist")
+    })?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_CREDENTIAL_BYTES
+    {
         return Err(AppError::environment(
             ErrorCode::CredentialError,
-            "credential file does not exist",
+            "credential file must be a non-empty regular file no larger than 1 MiB",
         ));
     }
     credential::bilibili_from_cookies(path, None).map_err(|_| {
@@ -22,6 +31,23 @@ pub fn open_credentials(path: &Path) -> Result<BiliBili, AppError> {
             "credential file could not be loaded",
         )
     })
+}
+
+pub fn ensure_credential_target_safe(path: &Path) -> Result<(), AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(AppError::environment(
+                ErrorCode::CredentialError,
+                "configuration target must be a regular file and not a symbolic link",
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AppError::environment(
+            ErrorCode::CredentialError,
+            "configuration target could not be inspected",
+        )),
+    }
 }
 
 pub async fn fetch_snapshot(bili: &BiliBili, bvid: &str) -> Result<RemoteSnapshot, AppError> {

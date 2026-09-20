@@ -143,6 +143,27 @@ fn validate_chapters(chapters: &[Chapter]) -> Result<(), AppError> {
 
 pub fn fingerprint(path: &str, cover: bool) -> Result<MediaFingerprint, AppError> {
     let path_ref = Path::new(path);
+    let size = validate_media(path_ref, cover)?;
+    let mut file = File::open(path_ref).map_err(|_| invalid("media file cannot be opened"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| invalid("media file could not be fully read"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(MediaFingerprint {
+        path: path.to_string(),
+        size,
+        sha256: hex(&hasher.finalize()),
+    })
+}
+
+fn validate_media(path_ref: &Path, cover: bool) -> Result<u64, AppError> {
     let metadata = path_ref
         .metadata()
         .map_err(|_| invalid("media file cannot be read"))?;
@@ -180,23 +201,7 @@ pub fn fingerprint(path: &str, cover: bool) -> Result<MediaFingerprint, AppError
             "media file exceeds the configured safety limit",
         ));
     }
-    let mut file = File::open(path_ref).map_err(|_| invalid("media file cannot be opened"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| invalid("media file could not be fully read"))?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(MediaFingerprint {
-        path: path.to_string(),
-        size: metadata.len(),
-        sha256: hex(&hasher.finalize()),
-    })
+    Ok(metadata.len())
 }
 
 pub fn validate_bvid(value: &str) -> Result<(), AppError> {
@@ -229,7 +234,7 @@ fn normalize_path(base: &Path, value: &str, cover: bool) -> Result<String, AppEr
         .to_str()
         .ok_or_else(|| invalid("file path must be valid Unicode"))?
         .to_string();
-    let _ = fingerprint(&text, cover)?;
+    validate_media(&canonical, cover)?;
     Ok(text)
 }
 

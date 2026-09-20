@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PLAN_LIFETIME_SECONDS: u64 = 15 * 60;
+const MAX_PLAN_BYTES: u64 = 4 * 1024 * 1024;
 
 pub async fn build_plan(request: Request, bili: Option<&BiliBili>) -> Result<Plan, AppError> {
     let media = match &request {
@@ -115,6 +116,15 @@ pub fn write_new(path: &Path, value: &PlanEnvelope) -> Result<(), AppError> {
 }
 
 pub fn read_and_verify(path: &Path, confirm: &str) -> Result<PlanEnvelope, AppError> {
+    let metadata = path
+        .metadata()
+        .map_err(|_| AppError::input(ErrorCode::PlanMismatch, "plan could not be read"))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_PLAN_BYTES {
+        return Err(AppError::input(
+            ErrorCode::PlanMismatch,
+            "plan must be a non-empty regular file no larger than 4 MiB",
+        ));
+    }
     let mut bytes = Vec::new();
     File::open(path)
         .and_then(|mut f| f.read_to_end(&mut bytes))

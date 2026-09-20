@@ -1,6 +1,6 @@
 use bili_uploader::backend::{
-    NewStudio, create_studio, fetch_editable, fetch_snapshot, open_credentials, response_bvid,
-    submit_create, submit_edit, upload_cover, upload_video,
+    NewStudio, create_studio, ensure_credential_target_safe, fetch_editable, fetch_snapshot,
+    open_credentials, response_bvid, submit_create, submit_edit, upload_cover, upload_video,
 };
 use bili_uploader::error::{AppError, ErrorCode};
 use bili_uploader::model::{Plan, Receipt, RemoteSnapshot, Request, Visibility};
@@ -122,6 +122,7 @@ async fn run() -> Result<(), AppError> {
 }
 
 async fn login(config: &Path) -> Result<(), AppError> {
+    ensure_credential_target_safe(config)?;
     let credential = biliup::uploader::credential::Credential::new(None);
     let value = credential.get_qrcode().await.map_err(|_| {
         AppError::environment(
@@ -301,6 +302,7 @@ async fn action(expected_operation: &str, args: ActionArgs) -> Result<(), AppErr
             "request differs from the dry-run plan",
         ));
     }
+    let _media_guards = protect_local_media(&saved.plan)?;
     verify_local(&saved.plan)?;
     validate_semantics(&saved.plan)?;
     let bili = open_credentials(&config)?;
@@ -368,6 +370,45 @@ async fn action(expected_operation: &str, args: ActionArgs) -> Result<(), AppErr
         status: "success",
         data: receipt,
     })
+}
+
+fn protect_local_media(plan: &Plan) -> Result<Vec<File>, AppError> {
+    let mut files = Vec::with_capacity(2);
+    for fingerprint in [plan.media.as_ref(), plan.cover.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let file = open_media_guard(Path::new(&fingerprint.path)).map_err(|_| {
+            AppError::input(
+                ErrorCode::PlanMismatch,
+                "a planned local file could not be protected from concurrent changes",
+            )
+        })?;
+        file.try_lock_shared().map_err(|_| {
+            AppError::input(
+                ErrorCode::PlanMismatch,
+                "a planned local file is in use by a conflicting writer",
+            )
+        })?;
+        files.push(file);
+    }
+    Ok(files)
+}
+
+#[cfg(windows)]
+fn open_media_guard(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_READ: u32 = 0x00000001;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_media_guard(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().read(true).open(path)
 }
 
 async fn execute(
@@ -832,6 +873,10 @@ fn print_error(error: &AppError) {
 #[cfg(test)]
 mod tests {
     use super::default_config_path;
+    #[cfg(windows)]
+    use super::open_media_guard;
+    #[cfg(windows)]
+    use std::fs::OpenOptions;
     use std::path::Path;
 
     #[test]
@@ -850,5 +895,17 @@ mod tests {
     fn installed_binary_uses_its_own_directory_for_default_config() {
         let path = default_config_path(Path::new("C:/Tools/bili-uploader.exe")).unwrap();
         assert_eq!(path, Path::new("C:/Tools/config.json"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn media_guard_rejects_concurrent_writers() {
+        let path =
+            std::env::temp_dir().join(format!("bili-uploader-guard-{}.mp4", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"synthetic video bytes").unwrap();
+        let guard = open_media_guard(&path).unwrap();
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+        drop(guard);
+        std::fs::remove_file(path).unwrap();
     }
 }
