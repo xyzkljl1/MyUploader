@@ -4,7 +4,7 @@ namespace NexusUploader;
 
 internal static class Planner
 {
-    public const string Version = "1.0";
+    public const string Version = "1.1";
     public static string Fingerprint(Request request, Target target, PackageInfo package, FileIntent intent) => Json.Hash(new { toolVersion = Version, request, target, package, intent });
 
     public static FileIntent Resolve(Request request, Target target, PackageInfo package)
@@ -21,7 +21,7 @@ internal static class Planner
 
     public static async Task<Plan> PrepareAsync(Request request, NexusApi api, string key, CancellationToken ct)
     {
-        using var package = await Packaging.BuildAsync(request.ModDirectory, key, ct);
+        using var package = await Packaging.BuildAsync(request.ModDirectory, key, request.IncludeRootDirectory, ct);
         var target = await api.InspectAsync(request.ModId, ct);
         var intent = Resolve(request, target, package.Info);
         Guard.PublicText(Json.Serialize(new { target, package = package.Info, intent }), key);
@@ -80,7 +80,7 @@ internal static class Publisher
     {
         Planner.CheckPlan(plan, request, confirm);
         using var journal = new Journal(stateDirectory, request);
-        using var package = await Packaging.BuildAsync(request.ModDirectory, key, ct);
+        using var package = await Packaging.BuildAsync(request.ModDirectory, key, request.IncludeRootDirectory, ct);
         Guard.Require(Json.Hash(package.Info) == Json.Hash(plan.Package), "PACKAGE_CHANGED", "文件夹内容或 modinfo.ini 已变化，必须重新 dry-run。");
         var target = await api.InspectAsync(request.ModId, ct);
         var intent = Planner.Resolve(request, target, package.Info);

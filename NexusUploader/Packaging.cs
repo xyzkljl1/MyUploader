@@ -17,7 +17,10 @@ internal static class Packaging
     private const long MaxBytes = 8L * 1024 * 1024 * 1024;
     private sealed record Entry(string Path, string Name, bool Directory);
 
-    public static async Task<PreparedPackage> BuildAsync(string directory, string key, CancellationToken ct)
+    public static Task<PreparedPackage> BuildAsync(string directory, string key, CancellationToken ct) =>
+        BuildAsync(directory, key, includeRootDirectory: true, ct);
+
+    public static async Task<PreparedPackage> BuildAsync(string directory, string key, bool includeRootDirectory, CancellationToken ct)
     {
         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
         Guard.Require(Directory.Exists(directory), "MOD_DIRECTORY", "modDirectory 必须是存在的文件夹。");
@@ -51,12 +54,24 @@ internal static class Packaging
                 "MOD_DIRECTORY", "源文件夹不能包含工具的临时打包目录。");
             output = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 128 * 1024,
                 FileOptions.DeleteOnClose | FileOptions.SequentialScan);
+            string? rootDirectory = null;
             using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true, entryNameEncoding: Encoding.UTF8))
             {
+                if (includeRootDirectory)
+                {
+                    rootDirectory = Path.GetFileName(directory);
+                    Guard.Require(!string.IsNullOrWhiteSpace(rootDirectory), "PACKAGE_ROOT", "启用根目录层时，modDirectory 必须具有有效目录名。");
+                    CheckName(rootDirectory);
+                    Guard.PublicText(rootDirectory, key);
+                    var root = zip.CreateEntry(rootDirectory + "/", CompressionLevel.Optimal);
+                    root.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+                    root.ExternalAttributes = 0x10;
+                }
                 foreach (var entry in entries)
                 {
                     ct.ThrowIfCancellationRequested();
-                    var item = zip.CreateEntry(entry.Name, CompressionLevel.Optimal);
+                    var zipName = rootDirectory is null ? entry.Name : rootDirectory + "/" + entry.Name;
+                    var item = zip.CreateEntry(zipName, CompressionLevel.Optimal);
                     // Fixed metadata + sorted paths make content-identical folders produce identical ZIP bytes.
                     item.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
                     item.ExternalAttributes = entry.Directory ? 0x10 : 0;
@@ -73,7 +88,8 @@ internal static class Packaging
             output.Position = 0;
             var hash = Convert.ToHexString(await SHA256.HashDataAsync(output, ct)).ToLowerInvariant();
             output.Position = 0;
-            var package = new PreparedPackage(output, new(metadata.Name, metadata.Version, archiveName, output.Length, hash, sources.Count));
+            var package = new PreparedPackage(output, new(metadata.Name, metadata.Version, archiveName, output.Length,
+                hash, sources.Count, rootDirectory));
             output = null; // Ownership transfers only after all validation succeeds.
             return package;
         }

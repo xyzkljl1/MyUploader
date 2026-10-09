@@ -127,16 +127,25 @@ internal static class Tests
                 File.WriteAllText(Path.Combine(request.ModDirectory, "nested", "data.txt"), "fixture");
                 PackageInfo first;
                 string temporary;
+                var rootName = Path.GetFileName(request.ModDirectory);
                 using (var package = await Packaging.BuildAsync(request.ModDirectory, Key, default))
                 {
                     first = package.Info; temporary = package.Stream.Name;
-                    Check(first.Name == "Test Mod" && first.Version == "2.0" && first.ArchiveName == "Test_Mod-2.0.zip" && first.FileCount == 3);
+                    Check(first.Name == "Test Mod" && first.Version == "2.0" && first.ArchiveName == "Test_Mod-2.0.zip" &&
+                        first.FileCount == 3 && first.RootDirectory == rootName);
                     using var zip = new ZipArchive(package.Stream, ZipArchiveMode.Read, leaveOpen: true);
-                    Check(zip.Entries.Select(e => e.FullName).SequenceEqual(new[] { "empty/", "mod.lua", "modinfo.ini", "nested/", "nested/data.txt" }));
-                    using var reader = new StreamReader(zip.GetEntry("modinfo.ini")!.Open());
+                    Check(zip.Entries.Select(e => e.FullName).SequenceEqual(new[] { rootName + "/", rootName + "/empty/",
+                        rootName + "/mod.lua", rootName + "/modinfo.ini", rootName + "/nested/", rootName + "/nested/data.txt" }));
+                    using var reader = new StreamReader(zip.GetEntry(rootName + "/modinfo.ini")!.Open());
                     Check(reader.ReadToEnd().Contains("version=2.0"));
                 }
                 Check(!File.Exists(temporary));
+                using (var flat = await Packaging.BuildAsync(request.ModDirectory, Key, includeRootDirectory: false, default))
+                {
+                    Check(flat.Info.RootDirectory is null && flat.Info.Sha256 != first.Sha256);
+                    using var zip = new ZipArchive(flat.Stream, ZipArchiveMode.Read, leaveOpen: true);
+                    Check(zip.Entries.Select(e => e.FullName).SequenceEqual(new[] { "empty/", "mod.lua", "modinfo.ini", "nested/", "nested/data.txt" }));
+                }
                 File.SetLastWriteTimeUtc(Path.Combine(request.ModDirectory, "mod.lua"), DateTime.UtcNow.AddDays(-10));
                 using var second = await Packaging.BuildAsync(request.ModDirectory, Key, default);
                 Check(Json.Hash(first) == Json.Hash(second.Info));
@@ -210,6 +219,19 @@ internal static class Tests
                 var calls = mock.Calls.Count;
                 await RejectAsync(() => Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, state, default), "ALREADY_ATTEMPTED");
                 Check(mock.Calls.Count == calls);
+            });
+            await Run("flat ZIP option survives dry-run and execute", async () =>
+            {
+                var (request, mock) = Setup();
+                request = request with { IncludeRootDirectory = false };
+                var storage = new StorageMock();
+                using var api = new NexusApi(Key, false, mock, storage);
+                var plan = await Planner.PrepareAsync(request, api, Key, default);
+                Check(!plan.Request.IncludeRootDirectory && plan.Package.RootDirectory is null);
+                var receipt = await Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, State(), default);
+                Check(receipt.Status == "success");
+                using var zip = new ZipArchive(new MemoryStream(storage.Bytes.ToArray()), ZipArchiveMode.Read);
+                Check(zip.GetEntry("modinfo.ini") is not null && zip.Entries.All(e => !e.FullName.Contains('/')));
             });
             await Run("first Main File publish path", async () =>
             {

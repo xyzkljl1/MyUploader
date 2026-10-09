@@ -117,7 +117,7 @@ internal static class Program
         if (args.Length == 0 || args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
-                NexusUploader 1.0 — automation CLI (.NET 8, JSON stdout)
+                NexusUploader 1.1 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
                 resolve --mod-url <Nexus mod page URL>
@@ -129,7 +129,7 @@ internal static class Program
                 update-file --request <same JSON> --execute --plan <plan> --confirm <planSha256>
                 create-mod / update-info: unsupported until a reliable API integration is available (exit 2).
 
-                Request: requestId, operation=update-file, exactly one of target/modId, modDirectory; optional description/changelog.
+                Request: requestId, operation=update-file, exactly one of target/modId, modDirectory; optional includeRootDirectory (default true), description/changelog.
                 Package: reads modinfo.ini name/version, creates ZIP, computes hash automatically.
                 Main Files: none -> create; one -> update; multiple -> error.
                 Dry-run: temporary packaging, read-only remote checks, local plan creation, no upload.

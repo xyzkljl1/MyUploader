@@ -3,6 +3,7 @@
   "operation": "update-file",
   "target": "replace-with-registered-target",
   "modDirectory": "../release/ExampleMod",
+  "includeRootDirectory": true,
   "description": "Release file description.",
   "changelog": "Describe the changes for this release."
 }

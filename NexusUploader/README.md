@@ -35,6 +35,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
   "operation": "update-file",
   "target": "example-mod",
   "modDirectory": "../release/ExampleMod",
+  "includeRootDirectory": true,
   "description": "Release file description.",
   "changelog": "Describe the changes for this release."
 }
@@ -49,6 +50,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | `target` | 二选一 | `modconfig.json` 中已经登记的稳定名称；推荐使用。名称为 1–64 个小写 ASCII 字母、数字、点、下划线或连字符，并以字母或数字开头 |
 | `modId` | 二选一 | Nexus **v3 全局 mod ID**，正整数字符串；不是 URL 中的游戏内页面 ID，不得直接互换或猜测。与 `target` 不能同时提供 |
 | `modDirectory` | 是 | 准备发布的本地文件夹；支持绝对路径，或相对**请求 JSON 所在目录**的路径。根目录必须包含 `modinfo.ini` |
+| `includeRootDirectory` | 否 | 是否在 ZIP 中增加以 `modDirectory` 文件夹名命名的顶层目录；默认 `true`。设为 `false` 时文件直接放在 ZIP 根目录 |
 | `description` | 否 | 此次上传的**文件版本说明**，不修改 mod 页面正文；不从 INI 的 description 自动继承。省略或 null 时不发送此字段；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 | `changelog` | 否 | 文件发布并核验成功后，为 INI 版本号追加的 mod 更新日志；不会替换旧日志。省略或 null 时跳过此调用；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 
@@ -67,7 +69,7 @@ author=ExampleAuthor
 - `name` 为 1–50 字符，须含字母或数字，只允许 ASCII 字母、数字、空格、下划线、单引号、括号、点和连字符。新建 Main File 时用作文件显示名称。
 - `version` 为 1–50 字符，须含字母或数字，只允许 ASCII 字母、数字、点和连字符。用于文件版本、mod 页面版本、changelog 版本。
 - 下载文件名自动生成为 `<name>-<version>.zip`：名称内空格改为下划线，去除首尾点，Windows 保留名称加 `mod-` 前缀。例如 `Test Mod` / `2.0` 得到 `Test_Mod-2.0.zip`。
-- 文件夹内容直接放在 ZIP 根目录，包含 `modinfo.ini`、子目录和空目录；不额外套一层文件夹。不编译源代码，不修改 INI，不自动过滤源码或运行时配置。调用任务先按所属项目规则准备干净的发布目录。
+- 默认以传入文件夹的实际名称增加一层 ZIP 顶层目录。例如传入 `E:\Mods\Clock`，条目为 `Clock/modinfo.ini`、`Clock/...`。设置 `includeRootDirectory: false` 后，内容才直接位于 ZIP 根目录。两种模式都包含 `modinfo.ini`、子目录和空目录。不编译源代码，不修改 INI，不自动过滤源码或运行时配置。调用任务先按所属项目规则准备干净的发布目录。
 - 条目按路径排序，ZIP 时间固定；同一工具运行环境中，路径与内容相同会得到相同字节和 SHA-256。仅修改源文件时间不会使计划失效。
 - dry-run 与 execute 都生成并检查临时 ZIP。临时存储名为随机名，上传时使用上面的下载文件名；退出打包/上传流程时自动删除临时 ZIP，不在源目录留下压缩包。
 
@@ -119,7 +121,7 @@ pwsh -NoProfile -File $tool update-file `
 
 `inspect` 可接受全局 `--mod-id`、`--mod-url` 或 `--target`，三者必须且只能选择一个。输出 `target.modId` 和文件/版本历史，使用 URL 时还输出不含原始 URL/查询参数的 `resolution`。这些操作不查询账号或所有者。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。
 
-dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容及拟发布的 description/changelog。远端传输层仅允许 GET，不创建上传会话、不上传文件。
+dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数及启用时的 `rootDirectory`）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容、ZIP 顶层目录及拟发布的 description/changelog。远端传输层仅允许 GET，不创建上传会话、不上传文件。
 
 计划是本地新文件，已有文件不覆盖。计划不含凭据/签名 URL，但含本地源路径和拟发布内容，保存在受控目录。计划有效期为 15 分钟。
 
