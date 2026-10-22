@@ -223,6 +223,12 @@ internal sealed class NexusApi : IDisposable
         if (request.Changelog is not null)
             await SendAsync(HttpMethod.Post, $"mods/{request.ModId}/changelogs", new { version, changelog = request.Changelog }, 201, ct);
     }
+
+    public async Task UpdateDescriptionAsync(string modId, string description, CancellationToken ct)
+    {
+        Guard.Id(modId);
+        await SendAsync(HttpMethod.Patch, $"mods/{modId}", new { description }, 204, ct);
+    }
 }
 
 // Streams a bounded part without buffering the whole part/archive or closing the locked archive.

@@ -1,6 +1,8 @@
 **/bin/
 **/obj/
 **/target/
+**/AGENTS.md
+**/TODO.md
 .local/
 **/.nexus-state/
 **/.bili-state/

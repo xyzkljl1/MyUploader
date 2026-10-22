@@ -25,6 +25,15 @@ internal sealed record Request
     public string? Changelog { get; init; }
 }
 
+internal sealed record UpdateInfoRequest
+{
+    public string RequestId { get; init; } = "";
+    public string Operation { get; init; } = "";
+    public string ModId { get; init; } = "";
+    public string? Target { get; init; }
+    public string Description { get; init; } = "";
+}
+
 internal sealed record FileVersion(string Id, string Name, string Version, string Category, bool IsPrimary);
 internal sealed record RemoteFile(string Id, string Name, bool IsActive, FileVersion[] Versions);
 internal sealed record Target(string ModId, RemoteFile[] Files);
@@ -35,6 +44,8 @@ internal sealed record PackageInfo(string Name, string Version, string ArchiveNa
 internal sealed record FileIntent(string Action, string? FileId, string Name, string Category);
 internal sealed record Plan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
     Request Request, Target Target, PackageInfo Package, FileIntent Intent, string Fingerprint);
+internal sealed record UpdateInfoPlan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
+    UpdateInfoRequest Request, string Fingerprint);
 internal sealed record PublishResult(string PublishedId, string ResponseFileId);
 internal sealed record Receipt(string RequestId, string Status, string Stage, string? UploadId = null,
     string? PublishedId = null, string? ErrorCode = null, string? ModId = null, string? TargetFileId = null,
@@ -155,6 +166,21 @@ internal static class Guard
         var directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(request.ModDirectory, baseDirectory));
         Require(!directory.StartsWith(@"\\", StringComparison.Ordinal) && Directory.Exists(directory), "MOD_DIRECTORY", "modDirectory 必须是存在的本地文件夹。");
         var normalized = request with { RequestId = requestId.ToString("D"), ModDirectory = directory };
+        PublicText(Json.Serialize(normalized), apiKey);
+        return normalized;
+    }
+
+    public static UpdateInfoRequest Validate(UpdateInfoRequest request, string operation, string apiKey)
+    {
+        Require(request.Operation == operation && operation == "update-info", "OPERATION",
+            "operation 必须为受支持的 update-info 命令。");
+        Require(Guid.TryParseExact(request.RequestId, "D", out var requestId) && requestId != Guid.Empty,
+            "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
+        PublicText(Json.Serialize(request), apiKey);
+        Id(request.ModId);
+        if (request.Target is not null) TargetName(request.Target);
+        Text(request.Description, 1_000_000, "DESCRIPTION");
+        var normalized = request with { RequestId = requestId.ToString("D") };
         PublicText(Json.Serialize(normalized), apiKey);
         return normalized;
     }

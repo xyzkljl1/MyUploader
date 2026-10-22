@@ -43,13 +43,21 @@ internal sealed class Journal : IDisposable
     private readonly string path;
     public Receipt Current { get; private set; }
 
-    public Journal(string stateDirectory, Request request)
+    public Journal(string stateDirectory, Request request) : this(stateDirectory, request.RequestId, request.ModId)
+    {
+    }
+
+    public Journal(string stateDirectory, UpdateInfoRequest request) : this(stateDirectory, request.RequestId, request.ModId)
+    {
+    }
+
+    private Journal(string stateDirectory, string requestId, string modId)
     {
         Directory.CreateDirectory(stateDirectory);
-        var targetLock = Json.Hash(new { request.ModId });
+        var targetLock = Json.Hash(new { ModId = modId });
         gate = new FileStream(Path.Combine(stateDirectory, targetLock + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        path = Path.Combine(stateDirectory, request.RequestId + ".receipt.json");
-        Current = new(request.RequestId, "not_started", "validated", ModId: request.ModId);
+        path = Path.Combine(stateDirectory, requestId + ".receipt.json");
+        Current = new(requestId, "not_started", "validated", ModId: modId);
         try
         {
             Guard.Require(!File.Exists(path), "ALREADY_ATTEMPTED", "此 requestId 已尝试执行。请检查回执及 Nexus，禁止自动重试或换 ID 绕过。");

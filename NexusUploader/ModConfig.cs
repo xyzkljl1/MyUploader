@@ -66,6 +66,16 @@ internal static class ModRegistry
         return request with { Target = target.Name, ModId = target.ModId };
     }
 
+    public static UpdateInfoRequest Bind(UpdateInfoRequest request, string path)
+    {
+        var hasId = !string.IsNullOrWhiteSpace(request.ModId);
+        var hasTarget = !string.IsNullOrWhiteSpace(request.Target);
+        Guard.Require(hasId ^ hasTarget, "REQUEST_TARGET", "update-info 请求必须且只能提供 modId 或 target。");
+        if (hasId) return request;
+        var target = Find(path, request.Target!);
+        return request with { Target = target.Name, ModId = target.ModId };
+    }
+
     public static ModTarget Add(string path, string name, ModResolution resolution)
     {
         Guard.TargetName(name);

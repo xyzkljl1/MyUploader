@@ -43,8 +43,8 @@ internal static class Program
         }
         Guard.Require(command is "update-file" or "create-mod" or "update-info" or "inspect" or "resolve" or
             "target-add" or "target-list" or "target-show", "CLI", "未知命令，请运行 --help；参数内容不会回显。");
-        Guard.Require(command is not ("create-mod" or "update-info"), "UNSUPPORTED_OPERATION",
-            "当前未接入创建 mod 或修改页面信息的可靠 API。此操作不受支持，且不会读取凭据、访问网络或使用浏览器替代。");
+        Guard.Require(command != "create-mod", "UNSUPPORTED_OPERATION",
+            "当前未接入创建 mod 页面的可靠 API。此操作不受支持，且不会读取凭据、访问网络或使用浏览器替代。");
         var flags = new Dictionary<string, string>();
         for (var i = firstFlag; i < args.Length; i++)
         {
@@ -69,7 +69,7 @@ internal static class Program
             _ => new[] { "--request", "--config", "--plan", "--confirm", "--dry-run", "--execute" }
         };
         Guard.Require(flags.Keys.All(allowed.Contains), "CLI", "命令包含不适用的参数。");
-        if (command == "update-file")
+        if (command is "update-file" or "update-info")
         {
             Required(flags, "--request"); Required(flags, "--plan");
             Guard.Require(flags.ContainsKey("--dry-run") ^ flags.ContainsKey("--execute"), "CLI_MODE", "必须且只能选择 --dry-run 或 --execute。");
@@ -117,7 +117,7 @@ internal static class Program
         if (args.Length == 0 || args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
-                NexusUploader 1.1 — automation CLI (.NET 8, JSON stdout)
+                NexusUploader 1.2 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
                 resolve --mod-url <Nexus mod page URL>
@@ -127,13 +127,16 @@ internal static class Program
                 inspect (--mod-id <global Nexus v3 ID> | --mod-url <Nexus mod page URL> | --target <stable-name>)
                 update-file --request <JSON> --dry-run --plan <new *.plan.json>
                 update-file --request <same JSON> --execute --plan <plan> --confirm <planSha256>
-                create-mod / update-info: unsupported until a reliable API integration is available (exit 2).
+                update-info --request <JSON> --dry-run --plan <new *.plan.json>
+                update-info --request <same JSON> --execute --plan <plan> --confirm <planSha256>
+                create-mod: unsupported until a reliable API integration is available (exit 2).
 
-                Request: requestId, operation=update-file, exactly one of target/modId, modDirectory; optional includeRootDirectory (default true), description/changelog.
+                update-file request: requestId, operation, exactly one of target/modId, modDirectory; optional includeRootDirectory (default true), description/changelog.
+                update-info request: requestId, operation, exactly one of target/modId, description (full mod page BBCode).
                 Package: reads modinfo.ini name/version, creates ZIP, computes hash automatically.
                 Main Files: none -> create; one -> update; multiple -> error.
-                Dry-run: temporary packaging, read-only remote checks, local plan creation, no upload.
-                Execute: plan expires after 15 minutes; repackages and rechecks content and remote state.
+                Dry-run: read-only remote checks and local plan creation; update-file also builds a temporary package.
+                Execute: plan expires after 15 minutes; update-file repackages and rechecks content and remote state.
                 Only reliable APIs/tools are allowed. No browser/computer-use implementation or fallback.
                 No interactive prompts, auto-login, API key CLI args, --yes, --force, or automatic retries.
                 Exit codes: 0 success; 2 input/guard; 3 service/environment; 4 partial/uncertain; 130 cancelled.
@@ -195,23 +198,44 @@ internal static class Program
             return 0;
         }
         var requestPath = Path.GetFullPath(flags["--request"]);
-        var request = Guard.Validate(ModRegistry.Bind(Json.Read<Request>(requestPath), modConfigPath),
-            command, Path.GetDirectoryName(requestPath)!, credentials.ApiKey);
         var planPath = Path.GetFullPath(flags["--plan"]);
         Guard.Require(planPath.EndsWith(".plan.json", StringComparison.OrdinalIgnoreCase), "PLAN_PATH", "计划文件必须使用 .plan.json 扩展名。");
         var dryRun = flags.ContainsKey("--dry-run");
         if (dryRun) Guard.Require(!File.Exists(planPath), "PLAN_EXISTS", "计划已存在；使用新的计划路径以保留审查记录。");
         using var client = new NexusApi(credentials.ApiKey, readOnly: dryRun);
-        if (dryRun)
+        if (command == "update-info")
         {
-            var plan = await Planner.PrepareAsync(request, client, credentials.ApiKey, ct);
-            Json.WriteNew(planPath, plan);
-            Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256 = Json.Hash(plan), plan }));
+            var request = Guard.Validate(ModRegistry.Bind(Json.Read<UpdateInfoRequest>(requestPath), modConfigPath),
+                command, credentials.ApiKey);
+            if (dryRun)
+            {
+                var plan = await InfoPlanner.PrepareAsync(request, client, ct);
+                Json.WriteNew(planPath, plan);
+                Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256 = Json.Hash(plan), plan }));
+            }
+            else
+            {
+                var receipt = await InfoPublisher.ExecuteAsync(Json.Read<UpdateInfoPlan>(planPath), request,
+                    flags["--confirm"], client, StateDirectory(), ct);
+                Console.WriteLine(Json.Serialize(new { status = receipt.Status, receipt }));
+            }
         }
         else
         {
-            var receipt = await Publisher.ExecuteAsync(Json.Read<Plan>(planPath), request, flags["--confirm"], client, credentials.ApiKey, StateDirectory(), ct);
-            Console.WriteLine(Json.Serialize(new { status = receipt.Status, receipt }));
+            var request = Guard.Validate(ModRegistry.Bind(Json.Read<Request>(requestPath), modConfigPath),
+                command, Path.GetDirectoryName(requestPath)!, credentials.ApiKey);
+            if (dryRun)
+            {
+                var plan = await Planner.PrepareAsync(request, client, credentials.ApiKey, ct);
+                Json.WriteNew(planPath, plan);
+                Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256 = Json.Hash(plan), plan }));
+            }
+            else
+            {
+                var receipt = await Publisher.ExecuteAsync(Json.Read<Plan>(planPath), request, flags["--confirm"], client,
+                    credentials.ApiKey, StateDirectory(), ct);
+                Console.WriteLine(Json.Serialize(new { status = receipt.Status, receipt }));
+            }
         }
         return 0;
     }

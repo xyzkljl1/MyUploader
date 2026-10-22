@@ -39,6 +39,8 @@ internal static class Tests
                 Reject(() => App.Parse(["inspect"]), "CLI");
                 var update = App.Parse(["update-file", "--request", "r", "--dry-run", "--plan", "p"]);
                 Check(!update.Flags.ContainsKey("--config"));
+                var updateInfo = App.Parse(["update-info", "--request", "r", "--dry-run", "--plan", "p"]);
+                Check(updateInfo.Command == "update-info");
                 Check(Path.GetFileName(App.DefaultConfigPath()) == "config.json");
                 Reject(() => Json.Parse<Request>("{\"modId\":\"1\",\"ModId\":\"2\"}"), "DUPLICATE_JSON");
                 try { Json.Parse<Request>("{\"typo\":1}"); throw new Exception(); } catch (JsonException) { }
@@ -92,6 +94,10 @@ internal static class Tests
                 var raw = baseRequest with { ModId = "", Target = "fixture-mod" };
                 var bound = Guard.Validate(ModRegistry.Bind(raw, registryPath), "update-file", root, Key);
                 Check(bound.Target == "fixture-mod" && bound.ModId == "12345");
+                var info = new UpdateInfoRequest { RequestId = Guid.NewGuid().ToString(), Operation = "update-info",
+                    Target = "fixture-mod", Description = "[b]Page description[/b]" };
+                var boundInfo = Guard.Validate(ModRegistry.Bind(info, registryPath), "update-info", Key);
+                Check(boundInfo.Target == "fixture-mod" && boundInfo.ModId == "12345");
                 Reject(() => ModRegistry.Bind(baseRequest with { Target = "fixture-mod" }, registryPath), "REQUEST_TARGET");
                 Reject(() => ModRegistry.Add(registryPath, "fixture-mod", resolution), "TARGET_EXISTS");
                 using var api = new NexusApi(Key, true, mock, new StorageMock());
@@ -197,6 +203,45 @@ internal static class Tests
                 Check(Planner.Resolve(request, plan.Target with { Files = [main with { IsActive = false }, optional] }, plan.Package).Action == "create");
                 var old = optional with { IsActive = false, Versions = [new("202", "Old", "2.0", "old_version", false)] };
                 Reject(() => Planner.Resolve(request, plan.Target with { Files = [main, old] }, plan.Package), "DUPLICATE_VERSION");
+            });
+            await Run("description-only dry-run is read-only and strictly validated", async () =>
+            {
+                var (request, mock) = SetupInfo();
+                var normalized = Guard.Validate(request, "update-info", Key);
+                Check(normalized.Description == "[b]Full mod page[/b]\nSecond line");
+                Reject(() => Guard.Validate(request with { Description = " " }, "update-info", Key), "DESCRIPTION");
+                try { Json.Parse<UpdateInfoRequest>("{\"summary\":\"not supported\"}"); throw new Exception(); } catch (JsonException) { }
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var plan = await InfoPlanner.PrepareAsync(normalized, api, default);
+                Check(plan.Request.Description == normalized.Description && plan.Fingerprint == InfoPlanner.Fingerprint(normalized));
+                Check(mock.Calls.All(c => c.Method == "GET") && !mock.InfoUpdated);
+                await RejectAsync(() => api.UpdateDescriptionAsync(request.ModId, request.Description, default), "DRY_RUN_WRITE");
+                Reject(() => InfoPlanner.CheckPlan(plan, request with { Description = "changed" }, Json.Hash(plan)), "PLAN_MISMATCH");
+            });
+            await Run("description-only execute patches no file or changelog state", async () =>
+            {
+                var (request, mock) = SetupInfo();
+                using var api = new NexusApi(Key, false, mock, new StorageMock());
+                var plan = await InfoPlanner.PrepareAsync(request, api, default);
+                var state = State();
+                var receipt = await InfoPublisher.ExecuteAsync(plan, request, Json.Hash(plan), api, state, default);
+                Check(receipt.Status == "success" && receipt.Stage == "complete" && receipt.ModId == "12345");
+                Check(mock.InfoUpdated && mock.PageDescription == request.Description && !mock.Published && mock.ChangelogCalls == 0);
+                Check(mock.Calls.Count(c => c.Method == "PATCH") == 1 &&
+                    mock.Calls.Single(c => c.Method == "PATCH").Path == "/v3/mods/12345");
+                var calls = mock.Calls.Count;
+                await RejectAsync(() => InfoPublisher.ExecuteAsync(plan, request, Json.Hash(plan), api, state, default), "ALREADY_ATTEMPTED");
+                Check(mock.Calls.Count == calls);
+            });
+            await Run("description update failure records uncertain receipt", async () =>
+            {
+                var (request, mock) = SetupInfo(); mock.FailInfoUpdate = true;
+                using var api = new NexusApi(Key, false, mock, new StorageMock());
+                var plan = await InfoPlanner.PrepareAsync(request, api, default); var state = State();
+                await RejectAsync(() => InfoPublisher.ExecuteAsync(plan, request, Json.Hash(plan), api, state, default), "PARTIAL_OR_UNCERTAIN");
+                var receipt = Json.Read<Receipt>(Path.Combine(state, request.RequestId + ".receipt.json"));
+                Check(receipt.Status == "uncertain" && receipt.Stage == "update-description" &&
+                    receipt.ErrorCode == "API_HTTP_500" && !Json.Serialize(receipt).Contains(Key));
             });
             await Run("missing Main File automatically selects creation", async () =>
             {
@@ -438,14 +483,13 @@ internal static class Tests
             });
             await Run("unsupported operations stop before credentials or network", async () =>
             {
-                foreach (var command in new[] { "create-mod", "update-info" })
                 foreach (var mode in new[] { "--dry-run", "--execute" })
                 {
                     var original = Console.Out; using var output = new StringWriter();
                     try
                     {
                         Console.SetOut(output);
-                        var result = await App.Main([command, "--config", Path.Combine(root, "does-not-exist.secret.json"), mode]);
+                        var result = await App.Main(["create-mod", "--config", Path.Combine(root, "does-not-exist.secret.json"), mode]);
                         Check(result == 2);
                     }
                     finally { Console.SetOut(original); }
@@ -465,6 +509,10 @@ internal static class Tests
                     try { Json.Parse<Request>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
                 }
                 try { Json.Parse<Request>("{\"changes\":{}}"); throw new Exception(); } catch (JsonException) { }
+                foreach (var field in new[] { "summary", "modDirectory", "changelog", "includeRootDirectory" })
+                {
+                    try { Json.Parse<UpdateInfoRequest>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
+                }
                 return Task.CompletedTask;
             });
             Console.WriteLine($"PASS: {passed} test groups; no Nexus network traffic or real credentials used.");
@@ -506,13 +554,16 @@ internal static class Tests
         var request = new Request { RequestId = Guid.NewGuid().ToString(), Operation = "update-file", ModId = "12345", ModDirectory = directory, Description = "Example description", Changelog = "Example change" };
         return (request, new ApiMock());
     }
+    private static (UpdateInfoRequest, ApiMock) SetupInfo() =>
+        (new UpdateInfoRequest { RequestId = Guid.NewGuid().ToString(), Operation = "update-info", ModId = "12345",
+            Description = "[b]Full mod page[/b]\nSecond line" }, new ApiMock());
     private sealed class ApiMock : HttpMessageHandler
     {
         public List<(string Method, string Path)> Calls { get; } = [];
         public string OldVersion = "1.0", UploadFilename = "", PublishedVersion = "", PublishedName = "";
         public string ResponseFileId = "100", PublishedOwnerFileId = "100";
-        public string? Description;
-        public bool Empty, Published, FailChangelog, CancelUpload, DriftAfterUpload, FailReadback;
+        public string? Description, PageDescription;
+        public bool Empty, Published, FailChangelog, CancelUpload, DriftAfterUpload, FailReadback, InfoUpdated, FailInfoUpdate;
         public int ChangelogCalls;
         private long size;
         private const string UploadId = "11111111-2222-3333-4444-555555555555";
@@ -574,6 +625,15 @@ internal static class Tests
                 using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
                 Check(Published && body.RootElement.GetProperty("version").GetString() == PublishedVersion && body.RootElement.GetProperty("changelog").GetString() == "Example change");
                 ChangelogCalls++; return FailChangelog ? Response(new { error = Key }, 500) : Data(new { }, 201);
+            }
+            if (path == "/v3/mods/12345" && request.Method == HttpMethod.Patch)
+            {
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+                Check(body.RootElement.EnumerateObject().Count() == 1);
+                PageDescription = body.RootElement.GetProperty("description").GetString();
+                if (FailInfoUpdate) return Response(new { error = Key }, 500);
+                InfoUpdated = true;
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
             }
             throw new Exception("Unexpected fake API route.");
         }

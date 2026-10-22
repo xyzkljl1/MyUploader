@@ -1,6 +1,6 @@
 # NexusUploader
 
-供其他 Codex 任务调用的 .NET 8 命令行工具，通过 Nexus 官方 v3 API 发布文件。输入 mod 文件夹，工具读取 `modinfo.ini`、生成 ZIP，并自动选择新建 Main File 或添加版本。
+供其他 Codex 任务调用的 .NET 8 命令行工具，通过 Nexus 官方 v3 API 发布文件或单独替换 mod 页面正文。发布文件时输入 mod 文件夹，工具读取 `modinfo.ini`、生成 ZIP，并自动选择新建 Main File 或添加版本。
 
 ## 能力
 
@@ -10,9 +10,10 @@
 | `target add/list/show` | 在 uploader 的 `modconfig.json` 中登记、列出或查看发布目标 |
 | `inspect` | 按全局 `modId`、官方页面 URL 或已登记 target 读取文件及全部版本历史，只发送 GET |
 | `update-file` | 打包文件夹、分片上传、自动创建/更新 Main File、同步页面版本，可追加 changelog |
-| `create-mod` / `update-info` | 当前不支持；立即返回 `UNSUPPORTED_OPERATION`，退出码 2 |
+| `update-info` | 只替换已有 mod 页面的完整 BBCode 正文，不打包或上传文件，不改标题、摘要、版本及 changelog |
+| `create-mod` | 当前不支持；立即返回 `UNSUPPORTED_OPERATION`，退出码 2 |
 
-文件链路参考用户指定的 Updater、[Nexus 官方 OpenAPI](https://github.com/Nexus-Mods/Vortex/blob/master/packages/nexus-api-v3/schema/openapi.yaml) 和 [Nexus 官方上传 Action](https://github.com/Nexus-Mods/upload-action)。当前接入的可靠接口不包含创建 mod 页面或编辑页面标题/正文的操作。创建 Main File 的前提是 mod 页面已经存在。
+文件链路参考用户指定的 Updater、[Nexus 官方 OpenAPI](https://github.com/Nexus-Mods/Vortex/blob/master/packages/nexus-api-v3/schema/openapi.yaml) 和 [Nexus 官方上传 Action](https://github.com/Nexus-Mods/upload-action)。`update-info` 使用 OpenAPI 中的官方 `editMod` 接口；该接口目前标记为 Experimental，工具严格限定为已有页面的 `description` 字段。官方可靠接口仍不支持创建 mod 页面。创建 Main File 和修改正文的前提都是 mod 页面已经存在。
 
 所有工具仅使用可靠 API、官方 SDK/CLI 或成熟程序接口。禁止浏览器自动化、computer-use、DOM/表单操作、模拟输入及其包装方案。按项目所有者要求，开发验证不登录 Nexus，不做真实上传，不读取真实凭据。
 
@@ -55,6 +56,29 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | `changelog` | 否 | 文件发布并核验成功后，为 INI 版本号追加的 mod 更新日志；不会替换旧日志。省略或 null 时跳过此调用；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 
 `update-file` 请求 JSON 不接受用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；页面 URL 只用于下文的 `resolve`、`target add` 或 `inspect --mod-url` 命令。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行账号或所有者比对。
+
+### 单独修改页面正文
+
+从 [update-info.example.json](examples/update-info.example.json) 建立另一份请求：
+
+```json
+{
+  "requestId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  "operation": "update-info",
+  "target": "example-mod",
+  "description": "[b]Complete mod page description[/b]"
+}
+```
+
+| 字段 | 必填 | 含义 |
+| --- | --- | --- |
+| `requestId` | 是 | 本次正文修改的非空 UUID；同一次操作保留同一个 ID，用于防止重复写入 |
+| `operation` | 是 | 固定为 `update-info` |
+| `target` | 二选一 | `modconfig.json` 中已经登记的稳定名称；推荐使用 |
+| `modId` | 二选一 | Nexus v3 全局 mod ID；与 `target` 不能同时提供 |
+| `description` | 是 | 将要替换页面现有正文的完整 BBCode，须非空、无首尾空白和非法控制字符，最多 1,000,000 字符 |
+
+`update-info` 不接受 `summary`、标题、文件夹、版本、文件说明或 changelog 字段。`description` 是完整页面正文，不是增量片段；成功后旧正文会被整体替换。工具无法通过当前接口读回页面正文，因此 dry-run 会显示并固化待提交的完整文本，调用任务必须在确认摘要前审核它。
 
 ## 文件夹与 modinfo.ini
 
@@ -113,6 +137,10 @@ pwsh -NoProfile -File $tool inspect --target 'example-mod'
 pwsh -NoProfile -File $tool update-file `
   --request 'E:\MyRelease\release.json' `
   --dry-run --plan 'E:\MyRelease\release.plan.json'
+
+pwsh -NoProfile -File $tool update-info `
+  --request 'E:\MyRelease\update-info.json' `
+  --dry-run --plan 'E:\MyRelease\update-info.plan.json'
 ```
 
 `resolve` 严格接受 `https://nexusmods.com/<game-domain>/mods/<page-id>` 或带 `www` 的官方地址，可带普通查询参数和片段；拒绝其他主机、HTTP、用户信息、自定义端口和编码路径。它从 URL 提取游戏域名及游戏内页面 ID，通过 Nexus 官方 v3 `getMod` 接口取得全局 ID，并输出 `resolution.modId`。该官方接口当前标记为 Experimental；工具会校验响应中的 `game_scoped_id` 与 URL 一致，不会把页面 ID 当成全局 ID。
@@ -121,19 +149,25 @@ pwsh -NoProfile -File $tool update-file `
 
 `inspect` 可接受全局 `--mod-id`、`--mod-url` 或 `--target`，三者必须且只能选择一个。输出 `target.modId` 和文件/版本历史，使用 URL 时还输出不含原始 URL/查询参数的 `resolution`。这些操作不查询账号或所有者。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。
 
-dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数及启用时的 `rootDirectory`）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容、ZIP 顶层目录及拟发布的 description/changelog。远端传输层仅允许 GET，不创建上传会话、不上传文件。
+dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。`update-file` 计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数及启用时的 `rootDirectory`）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容、ZIP 顶层目录及拟发布的文件说明/changelog。`update-info` 计划包含规范化请求及完整页面正文，不创建压缩包。两者的 dry-run 远端传输层都仅允许 GET，不发送修改或创建上传会话。
 
 计划是本地新文件，已有文件不覆盖。计划不含凭据/签名 URL，但含本地源路径和拟发布内容，保存在受控目录。计划有效期为 15 分钟。
 
-已有任务上下文授权这次发布后，使用相同请求执行：
+已有任务上下文授权这次发布或正文替换后，使用相同请求执行：
 
 ```powershell
 pwsh -NoProfile -File $tool update-file `
   --request 'E:\MyRelease\release.json' `
   --execute --plan 'E:\MyRelease\release.plan.json' --confirm '<planSha256>'
+
+pwsh -NoProfile -File $tool update-info `
+  --request 'E:\MyRelease\update-info.json' `
+  --execute --plan 'E:\MyRelease\update-info.plan.json' --confirm '<planSha256>'
 ```
 
 `--confirm` 核对 dry-run 计划摘要，不是要求调用方计算压缩包摘要，也不代替发布授权。没有交互提示、默认执行模式、`--yes` 或 `--force`。
+
+`update-info` 执行前再次确认目标可读取，然后只发送一次正文修改请求。官方接口成功时返回 HTTP 204；当前接口没有提供正文读回核验。写请求发出后的超时、取消或非预期响应都按不确定结果处理，返回退出码 4 并要求人工核对，不能直接重试。该操作不会读取 `modinfo.ini`，不会打包、上传或修改文件版本和 changelog。
 
 使用 `target` 时，dry-run 会把 target 名称及当时解析出的全局 `modId` 一并写入计划。执行前重新读取 `modconfig.json`；如果名称改为另一个 modId，请求与计划将不匹配并停止。执行还会重新读取 INI、重新打包并比较计划中的包信息。修改、增加、删除或重命名源文件，改版本，改请求，或远端文件历史变化，都必须重新 dry-run。工具对每个 modId 使用同一安装目录中的互斥锁，所有调用任务应共用该目录。
 
@@ -159,7 +193,7 @@ pwsh -NoProfile -File $tool update-file `
 
 新回执还记录 `modId`、`targetFileId`（更新时的目标文件组）及 `responseFileId`（写响应中的 ID）。更新时 `publishedId` 是响应的 `version.id`，收到成功响应后先保存这些 ID，再做读回核验；核验失败会保留在 `verify-file` 阶段，便于只读排查。旧回执缺少这些字段时不能据此判断远端没有创建成功，也不能重传来复现响应。
 
-已尝试发布的 requestId 会被拒绝再次执行。不得删除回执、更换 requestId 或清空状态目录绕过防护。锁文件可以保留，活跃锁以系统句柄为准。沙箱 Schannel/TLS 错误应在沙箱外核实，不应据此判定凭据失效。
+已尝试发布或修改正文的 requestId 会被拒绝再次执行。不得删除回执、更换 requestId 或清空状态目录绕过防护。锁文件可以保留，活跃锁以系统句柄为准。沙箱 Schannel/TLS 错误应在沙箱外核实，不应据此判定凭据失效。
 
 ## 离线测试
 
@@ -167,4 +201,4 @@ pwsh -NoProfile -File $tool update-file `
 dotnet run --project .\NexusUploader\tests\NexusUploader.Tests.csproj
 ```
 
-使用合成文件夹、临时凭据与内存 HTTP handlers，不访问真实 Nexus，不读取真实配置，不启动浏览器。覆盖自动打包/选目标、INI、敏感内容、目录联接、源内容及远端变化、分片/读回/同步信息、互斥与部分失败，以及旧参数和不支持操作的拒绝。
+使用合成文件夹、临时凭据与内存 HTTP handlers，不访问真实 Nexus，不读取真实配置，不启动浏览器。覆盖自动打包/选目标、单独修改正文、INI、敏感内容、目录联接、源内容及远端变化、分片/读回/同步信息、互斥与部分失败，以及旧参数和不支持操作的拒绝。
