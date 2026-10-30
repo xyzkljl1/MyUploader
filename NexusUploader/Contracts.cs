@@ -47,6 +47,7 @@ internal sealed record Plan(string ToolVersion, DateTimeOffset CreatedAt, DateTi
 internal sealed record UpdateInfoPlan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
     UpdateInfoRequest Request, string Fingerprint);
 internal sealed record PublishResult(string PublishedId, string ResponseFileId);
+internal sealed record VerifiedPublish(string VersionId, string FileId);
 internal sealed record Receipt(string RequestId, string Status, string Stage, string? UploadId = null,
     string? PublishedId = null, string? ErrorCode = null, string? ModId = null, string? TargetFileId = null,
     string? ResponseFileId = null);

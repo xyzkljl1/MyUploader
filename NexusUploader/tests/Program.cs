@@ -284,7 +284,8 @@ internal static class Tests
                 using var api = new NexusApi(Key, false, mock, new StorageMock());
                 var plan = await Planner.PrepareAsync(request, api, Key, default);
                 var receipt = await Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, State(), default);
-                Check(receipt.Status == "success" && receipt.PublishedId == "100");
+                Check(receipt.Status == "success" && receipt.PublishedId == "102" && receipt.TargetFileId == "100");
+                Check(receipt.ResponseFileId == "102" && mock.ChangelogCalls == 1);
             });
             await Run("different write-response file ID is reconciled by the returned version ID", async () =>
             {
@@ -335,6 +336,10 @@ internal static class Tests
                     Reject(() => Publisher.VerifyPublished([file with { Versions = [invalid] }], plan.Package, plan.Intent, published), "VERIFY_FAILED");
                 Reject(() => Publisher.VerifyPublished([file with { IsActive = false }], plan.Package, plan.Intent, published), "VERIFY_FAILED");
                 Reject(() => Publisher.VerifyPublished([file with { Versions = [version, version] }], plan.Package, plan.Intent, published), "VERIFY_FAILED");
+                var create = plan.Intent with { Action = "create", FileId = null };
+                Check(Publisher.VerifyPublished([file], plan.Package, create, new("102", "102")) == new VerifiedPublish("102", "100"));
+                Check(Publisher.VerifyPublished([file], plan.Package, create, new("100", "100")) == new VerifiedPublish("102", "100"));
+                Reject(() => Publisher.VerifyPublished([file], plan.Package, create, new("900", "900")), "VERIFY_FAILED");
             });
             await Run("modified plan and expiration rejected", async () =>
             {
@@ -618,7 +623,7 @@ internal static class Tests
                 if (path == "/v3/mod-files") Check(Empty && body.RootElement.GetProperty("mod_id").GetString() == "12345");
                 else Check(!Empty && !body.RootElement.TryGetProperty("mod_id", out _));
                 Published = true;
-                return path == "/v3/mod-files" ? Data(new { id = "100" }, 201) : Data(new { file = new { id = ResponseFileId }, version = new { id = "102" } }, 201);
+                return path == "/v3/mod-files" ? Data(new { id = "102" }, 201) : Data(new { file = new { id = ResponseFileId }, version = new { id = "102" } }, 201);
             }
             if (path == "/v3/mods/12345/changelogs")
             {

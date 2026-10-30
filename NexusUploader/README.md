@@ -179,6 +179,7 @@ pwsh -NoProfile -File $tool update-info `
 - API 与存储客户端隔离，存储不携带 API key，均禁用自动重定向。只接受 AWS/R2 的 HTTPS 存储地址。禁止输出原始 HTTP 错误、响应体、签名地址及凭据，不能启用 HTTP 调试日志。
 - 上传合并不仅检查 HTTP 200，还核验 S3 完成 XML。关联文件前再查远端状态，关联后读回主要版本，最后才写 changelog。
 - 更新文件时以发布响应的 `version.id` 定位新版本，读回目标 mod 的完整历史，核对它属于计划中的文件组且名称、版本、分类、主要下载状态均正确。写响应的 `file.id` 单独记为诊断字段，不用它直接判定文件组归属；读回归属错误仍返回 `PUBLISH_MISMATCH`，核验不通过不会写 changelog。
+- 首次创建 Main File 时，Nexus 的顶层响应 ID 可能表示新版本或文件组。工具不根据该字段猜测类型，而是读回完整历史，要求名称、版本、分类、主要下载状态唯一匹配，并要求响应 ID 与读回的版本 ID 或文件组 ID 至少一个一致。回执最终记录读回确认的真实版本 ID 和文件组 ID。
 - 没有自动网络重试。先持久化回执再发第一个写请求；文件发布与 changelog 不是原子事务，外部调用仍可能在最终检查后并发修改。
 
 | 退出码 | 含义 |
@@ -191,7 +192,7 @@ pwsh -NoProfile -File $tool update-info `
 
 回执位置：工具目录 `.nexus-state/<requestId>.receipt.json`。包含 status、stage、安全的 upload/file ID 和 errorCode，不含原始错误。`changelog` 失败时文件可能已成功，不能重传；`publish-file` 断线时即使没有收到 ID 也须核对。
 
-新回执还记录 `modId`、`targetFileId`（更新时的目标文件组）及 `responseFileId`（写响应中的 ID）。更新时 `publishedId` 是响应的 `version.id`，收到成功响应后先保存这些 ID，再做读回核验；核验失败会保留在 `verify-file` 阶段，便于只读排查。旧回执缺少这些字段时不能据此判断远端没有创建成功，也不能重传来复现响应。
+新回执还记录 `modId`、`targetFileId`（读回确认的目标文件组）及 `responseFileId`（写响应中的诊断 ID）。读回核验成功后，`publishedId` 始终是实际新版本 ID；核验失败会保留在 `verify-file` 阶段，便于只读排查。旧回执缺少这些字段或在首次创建时记录了未经读回归类的响应 ID，不能据此判断远端没有创建成功，也不能重传来复现响应。
 
 已尝试发布或修改正文的 requestId 会被拒绝再次执行。不得删除回执、更换 requestId 或清空状态目录绕过防护。锁文件可以保留，活跃锁以系统句柄为准。沙箱 Schannel/TLS 错误应在沙箱外核实，不应据此判定凭据失效。
 

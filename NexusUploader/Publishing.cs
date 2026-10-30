@@ -106,8 +106,8 @@ internal static class Publisher
             var published = await api.PublishAsync(request, package.Info, intent, upload, ct);
             journal.Set("partial", "verify-file", publishedId: published.PublishedId, responseFileId: published.ResponseFileId);
             var files = await api.FilesAsync(request.ModId, ct);
-            VerifyPublished(files, package.Info, intent, published);
-            journal.Set("partial", "changelog");
+            var verified = VerifyPublished(files, package.Info, intent, published);
+            journal.Set("partial", "changelog", publishedId: verified.VersionId, targetFileId: verified.FileId);
             await api.ChangelogAsync(request, package.Info.Version, ct);
             journal.Set("success", "complete");
             return journal.Current;
@@ -124,20 +124,31 @@ internal static class Publisher
         }
     }
 
-    internal static void VerifyPublished(RemoteFile[] files, PackageInfo package, FileIntent intent, PublishResult published)
+    internal static VerifiedPublish VerifyPublished(RemoteFile[] files, PackageInfo package, FileIntent intent, PublishResult published)
     {
         var history = files.SelectMany(f => f.Versions.Select(v => (File: f, Version: v))).ToArray();
+        var matches = history.Where(x => x.Version.Version == package.Version && x.Version.IsPrimary &&
+            x.Version.Category == "main" && x.Version.Name == intent.Name && x.File.IsActive).ToArray();
+        Guard.Require(matches.Length == 1, "VERIFY_FAILED",
+            "Nexus 已返回创建成功，但读回未找到唯一且元数据一致的活动 Main File 版本；禁止再次上传。");
+        var match = matches[0];
         if (intent.Action == "update")
         {
             // Verify identity before metadata. A matching label on another version is insufficient.
             var created = history.Where(x => x.Version.Id == published.PublishedId).ToArray();
             Guard.Require(created.Length == 1, "VERIFY_FAILED", "发布返回的版本 ID 未在目标 mod 中唯一找到；禁止再次上传。");
             Guard.Require(created[0].File.Id == intent.FileId, "PUBLISH_MISMATCH", "读回发现新版本所属文件组与目标不符；请核对 Nexus，禁止重试。");
-        }
-        var matches = history.Where(x => x.Version.Version == package.Version && x.Version.IsPrimary &&
-            x.Version.Category == "main" && x.Version.Name == intent.Name && x.File.IsActive).ToArray();
-        Guard.Require(matches.Length == 1 && (intent.Action == "create" ? matches[0].File.Id == published.PublishedId :
-                matches[0].File.Id == intent.FileId && matches[0].Version.Id == published.PublishedId),
+            Guard.Require(match.File.Id == intent.FileId && match.Version.Id == published.PublishedId,
                 "VERIFY_FAILED", "Nexus 已返回创建成功，但读回核验未通过；禁止再次上传。");
+        }
+        else
+        {
+            // Nexus has returned the top-level create response ID as either the new file group ID
+            // or the new version ID. Accept only when the complete read-back identifies one exact
+            // release and the response ID matches one of those two identities.
+            Guard.Require(published.PublishedId == match.File.Id || published.PublishedId == match.Version.Id,
+                "VERIFY_FAILED", "首次创建文件的响应 ID 与读回的文件组及版本均不一致；禁止再次上传。");
+        }
+        return new(match.Version.Id, match.File.Id);
     }
 }
