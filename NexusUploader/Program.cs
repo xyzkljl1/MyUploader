@@ -4,7 +4,7 @@ namespace NexusUploader;
 
 internal static class Program
 {
-    private static readonly HashSet<string> ValueFlags = new(["--request", "--config", "--plan", "--confirm", "--mod-id", "--mod-url", "--name", "--target"]);
+    private static readonly HashSet<string> ValueFlags = new(["--request", "--config", "--plan", "--confirm", "--mod", "--mod-url", "--name", "--target"]);
     public static async Task<int> Main(string[] args)
     {
         using var cancellation = new CancellationTokenSource();
@@ -37,12 +37,12 @@ internal static class Program
         var firstFlag = 1;
         if (command == "target")
         {
-            Guard.Require(args.Length > 1 && args[1] is "add" or "list" or "show", "CLI", "target 必须指定 add、list 或 show。");
+            Guard.Require(args.Length > 1 && args[1] is "add" or "candidates" or "list" or "show", "CLI", "target 必须指定 add、candidates、list 或 show。");
             command = "target-" + args[1];
             firstFlag = 2;
         }
         Guard.Require(command is "update-file" or "create-mod" or "update-info" or "inspect" or "resolve" or
-            "target-add" or "target-list" or "target-show", "CLI", "未知命令，请运行 --help；参数内容不会回显。");
+            "target-add" or "target-candidates" or "target-list" or "target-show", "CLI", "未知命令，请运行 --help；参数内容不会回显。");
         Guard.Require(command != "create-mod", "UNSUPPORTED_OPERATION",
             "当前未接入创建 mod 页面的可靠 API。此操作不受支持，且不会读取凭据、访问网络或使用浏览器替代。");
         var flags = new Dictionary<string, string>();
@@ -61,9 +61,10 @@ internal static class Program
         }
         var allowed = command switch
         {
-            "inspect" => new[] { "--mod-id", "--mod-url", "--target", "--config" },
+            "inspect" => new[] { "--mod", "--target", "--config" },
             "resolve" => new[] { "--mod-url", "--config" },
-            "target-add" => new[] { "--name", "--mod-url", "--config" },
+            "target-add" => new[] { "--name", "--mod", "--config" },
+            "target-candidates" => new[] { "--config" },
             "target-list" => new[] { "--config" },
             "target-show" => new[] { "--name", "--config" },
             _ => new[] { "--request", "--config", "--plan", "--confirm", "--dry-run", "--execute" }
@@ -76,10 +77,10 @@ internal static class Program
             Guard.Require(flags.ContainsKey("--execute") == flags.ContainsKey("--confirm"), "CLI_MODE", "执行必须提供 --confirm；dry-run 不接受确认参数。");
         }
         else if (command == "inspect")
-            Guard.Require(new[] { "--mod-id", "--mod-url", "--target" }.Count(flags.ContainsKey) == 1,
-                "CLI", "inspect 必须且只能提供 --mod-id、--mod-url 或 --target。");
+            Guard.Require(new[] { "--mod", "--target" }.Count(flags.ContainsKey) == 1,
+                "CLI", "inspect 必须且只能提供 --mod 或 --target。");
         else if (command == "resolve") Required(flags, "--mod-url");
-        else if (command == "target-add") { Required(flags, "--name"); Required(flags, "--mod-url"); }
+        else if (command == "target-add") { Required(flags, "--name"); Required(flags, "--mod"); }
         else if (command == "target-show") Required(flags, "--name");
         return (command, flags);
     }
@@ -117,14 +118,15 @@ internal static class Program
         if (args.Length == 0 || args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
-                NexusUploader 1.2 — automation CLI (.NET 8, JSON stdout)
+                NexusUploader 1.3 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
                 resolve --mod-url <Nexus mod page URL>
-                target add --name <stable-name> --mod-url <Nexus mod page URL>
+                target candidates
+                target add --name <stable-name> --mod <global Nexus v3 ID | Nexus mod page URL>
                 target list
                 target show --name <stable-name>
-                inspect (--mod-id <global Nexus v3 ID> | --mod-url <Nexus mod page URL> | --target <stable-name>)
+                inspect (--mod <global Nexus v3 ID | Nexus mod page URL> | --target <stable-name>)
                 update-file --request <JSON> --dry-run --plan <new *.plan.json>
                 update-file --request <same JSON> --execute --plan <plan> --confirm <planSha256>
                 update-info --request <JSON> --dry-run --plan <new *.plan.json>
@@ -157,12 +159,30 @@ internal static class Program
             return 0;
         }
         var credentials = Credentials.Load(configPath);
+        if (command == "target-candidates")
+        {
+            var registered = ModRegistry.Load(modConfigPath, allowMissing: true).Targets
+                .Select(x => x.ModId).ToHashSet(StringComparer.Ordinal);
+            using var api = new NexusApi(credentials.ApiKey, readOnly: true);
+            var candidates = await api.CandidatesAsync(registered, ct);
+            Console.WriteLine(Json.Serialize(new { status = "candidates", candidates }));
+            return 0;
+        }
         if (command == "target-add")
         {
-            var modUrl = flags["--mod-url"];
-            Guard.PublicText(modUrl, credentials.ApiKey);
+            var mod = flags["--mod"];
+            Guard.PublicText(mod, credentials.ApiKey);
             using var api = new NexusApi(credentials.ApiKey, readOnly: true);
-            var resolution = await api.ResolveAsync(Guard.ModUrl(modUrl), ct);
+            ModResolution resolution;
+            if (IsNumeric(mod))
+            {
+                Guard.Id(mod);
+                var registered = ModRegistry.Load(modConfigPath, allowMissing: true).Targets
+                    .Select(x => x.ModId).ToHashSet(StringComparer.Ordinal);
+                Guard.Require(!registered.Contains(mod), "TARGET_EXISTS", "该全局 modId 已登记；禁止建立重复别名。");
+                resolution = (await api.CandidateAsync(mod, registered, ct)).Resolution;
+            }
+            else resolution = await api.ResolveAsync(Guard.ModUrl(mod), ct);
             var target = ModRegistry.Add(modConfigPath, flags["--name"], resolution);
             Console.WriteLine(Json.Serialize(new { status = "added", target }));
             return 0;
@@ -171,22 +191,25 @@ internal static class Program
         {
             using var api = new NexusApi(credentials.ApiKey, readOnly: true);
             ModResolution? resolution = null;
-            var modId = flags.GetValueOrDefault("--mod-id");
+            string? modId = null;
             if (flags.TryGetValue("--target", out var targetName))
             {
                 modId = ModRegistry.Find(modConfigPath, targetName).ModId;
             }
-            else if (modId is null)
-            {
-                var modUrl = flags["--mod-url"];
-                Guard.PublicText(modUrl, credentials.ApiKey);
-                resolution = await api.ResolveAsync(Guard.ModUrl(modUrl), ct);
-                modId = resolution.ModId;
-            }
             else
             {
-                Guard.Id(modId);
-                Guard.PublicText(modId, credentials.ApiKey);
+                var mod = command == "resolve" ? flags["--mod-url"] : flags["--mod"];
+                Guard.PublicText(mod, credentials.ApiKey);
+                if (command != "resolve" && IsNumeric(mod))
+                {
+                    Guard.Id(mod);
+                    modId = mod;
+                }
+                else
+                {
+                    resolution = await api.ResolveAsync(Guard.ModUrl(mod), ct);
+                    modId = resolution.ModId;
+                }
             }
             if (command == "resolve")
                 Console.WriteLine(Json.Serialize(new { status = "resolved", resolution }));
@@ -239,4 +262,6 @@ internal static class Program
         }
         return 0;
     }
+
+    private static bool IsNumeric(string value) => value.Length > 0 && value.All(c => c is >= '0' and <= '9');
 }

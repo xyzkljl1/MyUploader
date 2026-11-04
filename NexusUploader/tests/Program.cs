@@ -23,19 +23,21 @@ internal static class Tests
                 Reject(() => App.Parse(["update-file", "--config", "x", "--request", "r", "--plan", "p"]), "CLI_MODE");
                 Reject(() => App.Parse(["update-file", "--config", "x", "--config", "y"]), "CLI_DUPLICATE");
                 Reject(() => App.Parse(["inspect", "--apikey", Key]), "CLI");
-                var inspect = App.Parse(["inspect", "--mod-id", "12345"]);
+                var inspect = App.Parse(["inspect", "--mod", "12345"]);
                 Check(!inspect.Flags.ContainsKey("--config"));
-                var inspectUrl = App.Parse(["inspect", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
-                Check(inspectUrl.Flags.ContainsKey("--mod-url"));
+                var inspectUrl = App.Parse(["inspect", "--mod", "https://www.nexusmods.com/game/mods/1"]);
+                Check(inspectUrl.Flags.ContainsKey("--mod"));
                 var resolve = App.Parse(["resolve", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
                 Check(resolve.Command == "resolve");
-                var targetAdd = App.Parse(["target", "add", "--name", "fixture-mod", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
+                var targetAdd = App.Parse(["target", "add", "--name", "fixture-mod", "--mod", "https://www.nexusmods.com/game/mods/1"]);
                 Check(targetAdd.Command == "target-add");
+                Check(App.Parse(["target", "candidates"]).Command == "target-candidates");
                 Check(App.Parse(["target", "list"]).Command == "target-list");
                 Check(App.Parse(["target", "show", "--name", "fixture-mod"]).Command == "target-show");
                 Check(App.Parse(["inspect", "--target", "fixture-mod"]).Flags["--target"] == "fixture-mod");
-                Reject(() => App.Parse(["inspect", "--mod-id", "1", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
-                Reject(() => App.Parse(["inspect", "--mod-id", "1", "--target", "fixture-mod"]), "CLI");
+                Reject(() => App.Parse(["inspect", "--mod-id", "1"]), "CLI");
+                Reject(() => App.Parse(["inspect", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
+                Reject(() => App.Parse(["inspect", "--mod", "1", "--target", "fixture-mod"]), "CLI");
                 Reject(() => App.Parse(["inspect"]), "CLI");
                 var update = App.Parse(["update-file", "--request", "r", "--dry-run", "--plan", "p"]);
                 Check(!update.Flags.ContainsKey("--config"));
@@ -78,6 +80,21 @@ internal static class Tests
                 var result = await api.ResolveAsync(page, default);
                 Check(result.ModId == "12345" && result.GameId == "1704" && result.GameScopedId == "12604");
                 Check(mock.Calls.Single() == ("GET", "/v3/games/skyrimspecialedition/mods/12604"));
+            });
+            await Run("unregistered private empty team mods are returned as candidates", async () =>
+            {
+                var mock = new ApiMock();
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var candidates = await api.CandidatesAsync(new HashSet<string>(StringComparer.Ordinal) { "30000" }, default);
+                Check(candidates.Length == 1);
+                var candidate = candidates[0];
+                Check(candidate.ModId == "20000" && candidate.GameDomain == "skyrimspecialedition" &&
+                    candidate.GameScopedId == "200" && candidate.Status == "not_published" &&
+                    candidate.Affiliation == "owner" && candidate.FileCount == 0);
+                Check((await api.CandidateAsync("20000", new HashSet<string>(StringComparer.Ordinal), default)).Resolution.GameId == "1704");
+                await RejectAsync(() => api.CandidateAsync("12345", new HashSet<string>(StringComparer.Ordinal), default),
+                    "TARGET_NOT_CANDIDATE");
+                Check(mock.Calls.All(x => x.Method == "GET"));
             });
             await Run("central modconfig stores and binds verified publishing targets", async () =>
             {
@@ -482,7 +499,7 @@ internal static class Tests
                 var secretPath = Path.Combine(root, "invalid.secret.json");
                 File.WriteAllText(secretPath, "{\"NEXUSMODS_API_KEY\":\"" + Key);
                 var original = Console.Out; using var output = new StringWriter();
-                try { Console.SetOut(output); var result = await App.Main(["inspect", "--config", secretPath, "--mod-id", "12345"]); Check(result == 2); }
+                try { Console.SetOut(output); var result = await App.Main(["inspect", "--config", secretPath, "--mod", "12345"]); Check(result == 2); }
                 finally { Console.SetOut(original); }
                 Check(!output.ToString().Contains(Key) && output.ToString().Contains("JSON_INVALID"));
             });
@@ -577,6 +594,25 @@ internal static class Tests
             Check(request.RequestUri!.Host == "api.nexusmods.com" && request.Headers.GetValues("apikey").Single() == Key);
             var path = request.RequestUri.AbsolutePath;
             Calls.Add((request.Method.Method, path));
+            if (path == "/v3/team-mods" && request.Method == HttpMethod.Get)
+                return Response(new
+                {
+                    data = new
+                    {
+                        mods = new object[]
+                        {
+                            TeamMod("12345", "12604", "Published Mod", "published", "owner"),
+                            TeamMod("20000", "200", "New Private Page", "not_published", "owner"),
+                            TeamMod("30000", "300", "Hidden Existing Mod", "hidden", "contributor"),
+                            TeamMod("40000", "400", "Moderated Draft", "under_moderation", "owner")
+                        }
+                    },
+                    meta = new { page = 1, page_size = 100, total_count = 4 }
+                });
+            if (path == "/v3/mods/20000/files" && request.Method == HttpMethod.Get)
+                return Data(new { mod_files = Array.Empty<object>() });
+            if (path == "/v3/mods/30000/files" && request.Method == HttpMethod.Get)
+                return Data(new { mod_files = new[] { new { id = "301", name = "Existing", is_active = true, versions_count = 1 } } });
             if (path == "/v3/games/skyrimspecialedition/mods/12604" && request.Method == HttpMethod.Get)
                 return Data(new { id = "12345", game_scoped_id = "12604", game_id = "1704", name = "Fixture Mod" });
             if (path == "/v3/mods/12345/files")
@@ -642,6 +678,21 @@ internal static class Tests
             }
             throw new Exception("Unexpected fake API route.");
         }
+
+        private static object TeamMod(string id, string scopedId, string name, string status, string affiliation) => new
+        {
+            mod = new
+            {
+                id,
+                game_scoped_id = scopedId,
+                name,
+                status,
+                game = new { id = "1704", name = "Skyrim Special Edition", domain_name = "skyrimspecialedition" }
+            },
+            affiliation,
+            bug_tracker = "disabled",
+            open_bug_count = 0
+        };
     }
     private sealed class StorageMock : HttpMessageHandler
     {

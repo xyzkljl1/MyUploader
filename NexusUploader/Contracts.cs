@@ -39,6 +39,11 @@ internal sealed record RemoteFile(string Id, string Name, bool IsActive, FileVer
 internal sealed record Target(string ModId, RemoteFile[] Files);
 internal sealed record ModPageReference(string GameDomain, string GameScopedId);
 internal sealed record ModResolution(string GameDomain, string GameScopedId, string ModId, string GameId);
+internal sealed record ModCandidate(string ModId, string GameDomain, string GameName, string GameScopedId,
+    string GameId, string Name, string Status, string Affiliation, int FileCount)
+{
+    public ModResolution Resolution => new(GameDomain, GameScopedId, ModId, GameId);
+}
 internal sealed record PackageInfo(string Name, string Version, string ArchiveName, long SizeBytes, string Sha256,
     int FileCount, string? RootDirectory);
 internal sealed record FileIntent(string Action, string? FileId, string Name, string Category);

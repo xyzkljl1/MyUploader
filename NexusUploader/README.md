@@ -7,8 +7,8 @@
 | 命令 | 功能 |
 | --- | --- |
 | `resolve` | 从 Nexus 官方 mod 页面 URL 解析全局 v3 `modId`，只发送 GET |
-| `target add/list/show` | 在 uploader 的 `modconfig.json` 中登记、列出或查看发布目标 |
-| `inspect` | 按全局 `modId`、官方页面 URL 或已登记 target 读取文件及全部版本历史，只发送 GET |
+| `target candidates/add/list/show` | 获取可登记候选，并在 uploader 的 `modconfig.json` 中登记、列出或查看发布目标 |
+| `inspect` | 通过统一的 `--mod` 参数按全局 `modId` 或官方页面 URL，或按已登记 target 读取文件及全部版本历史，只发送 GET |
 | `update-file` | 打包文件夹、分片上传、自动创建/更新 Main File、同步页面版本，可追加 changelog |
 | `update-info` | 只替换已有 mod 页面的完整 BBCode 正文，不打包或上传文件，不改标题、摘要、版本及 changelog |
 | `create-mod` | 当前不支持；立即返回 `UNSUPPORTED_OPERATION`，退出码 2 |
@@ -55,7 +55,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | `description` | 否 | 此次上传的**文件版本说明**，不修改 mod 页面正文；不从 INI 的 description 自动继承。省略或 null 时不发送此字段；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 | `changelog` | 否 | 文件发布并核验成功后，为 INI 版本号追加的 mod 更新日志；不会替换旧日志。省略或 null 时跳过此调用；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 
-`update-file` 请求 JSON 不接受用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；页面 URL 只用于下文的 `resolve`、`target add` 或 `inspect --mod-url` 命令。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行账号或所有者比对。
+`update-file` 请求 JSON 不接受用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；页面 URL 只用于下文的 `resolve` 或统一接受 ID/URL 的 `target add`、`inspect --mod` 命令。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行额外账号身份比对。
 
 ### 单独修改页面正文
 
@@ -124,13 +124,12 @@ $tool = 'E:\MyWebsiteHelper\MyUploader\NexusUploader\nexus.ps1'
 
 pwsh -NoProfile -File $tool resolve --mod-url 'https://www.nexusmods.com/<game-domain>/mods/<page-id>'
 
-pwsh -NoProfile -File $tool target add --name 'example-mod' --mod-url 'https://www.nexusmods.com/<game-domain>/mods/<page-id>'
+pwsh -NoProfile -File $tool target candidates
+pwsh -NoProfile -File $tool target add --name 'example-mod' --mod '<global-mod-id-or-official-page-url>'
 pwsh -NoProfile -File $tool target list
 pwsh -NoProfile -File $tool target show --name 'example-mod'
 
-pwsh -NoProfile -File $tool inspect --mod-id '<global-mod-id>'
-
-pwsh -NoProfile -File $tool inspect --mod-url 'https://www.nexusmods.com/<game-domain>/mods/<page-id>'
+pwsh -NoProfile -File $tool inspect --mod '<global-mod-id-or-official-page-url>'
 
 pwsh -NoProfile -File $tool inspect --target 'example-mod'
 
@@ -145,9 +144,15 @@ pwsh -NoProfile -File $tool update-info `
 
 `resolve` 严格接受 `https://nexusmods.com/<game-domain>/mods/<page-id>` 或带 `www` 的官方地址，可带普通查询参数和片段；拒绝其他主机、HTTP、用户信息、自定义端口和编码路径。它从 URL 提取游戏域名及游戏内页面 ID，通过 Nexus 官方 v3 `getMod` 接口取得全局 ID，并输出 `resolution.modId`。该官方接口当前标记为 Experimental；工具会校验响应中的 `game_scoped_id` 与 URL 一致，不会把页面 ID 当成全局 ID。
 
-`target add` 执行同样的官方解析，然后以本地互斥锁和原子替换写入 `modconfig.json`；只保存名称、游戏域名、页面 ID、全局 modId、游戏 ID 和验证时间，不保存原始 URL/查询参数。名称或全局 ID 已存在时拒绝覆盖。`target list/show` 只读取 `modconfig.json`，不读取 API key，也不访问网络。
+`target candidates` 使用官方 v3 `team-mods` 接口分页读取当前 API key 用户拥有或作为团队成员参与的页面。它排除已经登记的 ID、公开/审核中/已删除页面，以及任何已有文件组的页面，只返回状态为 `not_published` 或 `hidden` 且文件组为零的候选。输出包含全局 ID、游戏域名及名称、页面 ID、页面名称、状态、团队关系和文件组数量；只发送 GET，不写配置，不做字符串或 AI 猜测。接口响应缺页、列表并发变化、未知状态或超过 10,000 个团队 mod 时安全停止。
 
-`inspect` 可接受全局 `--mod-id`、`--mod-url` 或 `--target`，三者必须且只能选择一个。输出 `target.modId` 和文件/版本历史，使用 URL 时还输出不含原始 URL/查询参数的 `resolution`。这些操作不查询账号或所有者。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。
+`target add --name <name> --mod <value>` 的 `--mod` 严格接受两种格式：纯数字始终表示全局 v3 `modId`；官方 HTTPS mod 页面 URL 则通过 `getMod` 解析。数字 ID 必须来自当前 `target candidates` 候选，登记前会重新查询并确认它仍然未登记、非公开且没有文件组；URL 保留为候选接口不可用或人工明确页面时的后备方式。验证成功后以本地互斥锁和原子替换写入 `modconfig.json`，只保存名称、游戏域名、页面 ID、全局 modId、游戏 ID 和验证时间，不保存原始 URL/查询参数。名称或全局 ID 已存在时拒绝覆盖。`target list/show` 只读取 `modconfig.json`，不读取 API key，也不访问网络。
+
+`inspect` 必须且只能选择统一的 `--mod` 或 `--target`。`--mod` 为纯数字时按全局 v3 ID 处理，为官方页面 URL 时先解析；URL 结果还输出不含原始 URL/查询参数的 `resolution`。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。
+
+### 面向调用 Agent 的首次登记流程
+
+已有 target 时直接使用 `update-file` 或 `update-info`，不得重复发现或登记。请求引用的 target 不存在时，调用 Agent 必须先运行 `target candidates`，不得立即要求用户提供 URL。Agent 应结合当前任务中的游戏、项目含义、目录名、`modinfo.ini` 名称以及候选的游戏和页面名称判断：只有一个合理候选时，可自行执行 `target add --name <stable-name> --mod <candidate-modId>`；禁止仅按列表顺序、最新页面或单一字符串相似度选择。存在多个合理候选或证据不足时，才向用户列出安全的候选信息并核实。登记后仍必须执行正常的 `update-file --dry-run` 并核对目标；官方候选接口不可用时才退回明确的官方页面 URL。
 
 dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。`update-file` 计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数及启用时的 `rootDirectory`）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容、ZIP 顶层目录及拟发布的文件说明/changelog。`update-info` 计划包含规范化请求及完整页面正文，不创建压缩包。两者的 dry-run 远端传输层都仅允许 GET，不发送修改或创建上传会话。
 
@@ -184,7 +189,7 @@ pwsh -NoProfile -File $tool update-info `
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 成功：`resolved` / `added` / `listed` / `shown` / `dry_run_ok` / `inspected` / `success` |
+| 0 | 成功：`resolved` / `candidates` / `added` / `listed` / `shown` / `dry_run_ok` / `inspected` / `success` |
 | 2 | 输入、校验或不支持的操作；修正具体问题，不能绕过防护 |
 | 3 | 网络/API/环境错误；仅在确认未开始写入后排查 |
 | 4 | 部分完成或结果不确定，核对回执及远端，禁止直接重试 |
@@ -202,4 +207,4 @@ pwsh -NoProfile -File $tool update-info `
 dotnet run --project .\NexusUploader\tests\NexusUploader.Tests.csproj
 ```
 
-使用合成文件夹、临时凭据与内存 HTTP handlers，不访问真实 Nexus，不读取真实配置，不启动浏览器。覆盖自动打包/选目标、单独修改正文、INI、敏感内容、目录联接、源内容及远端变化、分片/读回/同步信息、互斥与部分失败，以及旧参数和不支持操作的拒绝。
+使用合成文件夹、临时凭据与内存 HTTP handlers，不访问真实 Nexus，不读取真实配置，不启动浏览器。覆盖候选筛选及只读约束、统一 mod 引用、自动打包/选目标、单独修改正文、INI、敏感内容、目录联接、源内容及远端变化、分片/读回/同步信息、互斥与部分失败，以及旧参数和不支持操作的拒绝。

@@ -79,6 +79,21 @@ internal sealed class NexusApi : IDisposable
         return Property(doc.RootElement, "data").Clone();
     }
 
+    private async Task<(JsonElement Data, JsonElement Meta)> GetPageAsync(string path, CancellationToken ct)
+    {
+        Guard.Require(!path.Contains("..") && !path.Contains(':') && !path.StartsWith('/'),
+            "API_ROUTE", "拒绝非固定 Nexus API 路由。");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.nexusmods.com/v3/" + path);
+        using var response = await api.SendAsync(request, ct);
+        if (response.StatusCode != HttpStatusCode.OK)
+            throw new SafeException("API_HTTP_" + (int)response.StatusCode,
+                "Nexus API 返回非预期 HTTP 状态；响应正文已隐藏。", 3);
+        var raw = await response.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(raw);
+        Json.NoDuplicates(doc.RootElement);
+        return (Property(doc.RootElement, "data").Clone(), Property(doc.RootElement, "meta").Clone());
+    }
+
     public async Task<Target> InspectAsync(string modId, CancellationToken ct)
     {
         var target = new Target(modId, await FilesAsync(modId, ct));
@@ -105,6 +120,97 @@ internal sealed class NexusApi : IDisposable
         Guard.PublicText(Json.Serialize(resolution), key);
         return resolution;
     }
+
+    public async Task<ModCandidate[]> CandidatesAsync(IReadOnlySet<string> registeredModIds, CancellationToken ct)
+    {
+        const int pageSize = 100;
+        const int maximumTeamMods = 10_000;
+        var teamMods = new List<(JsonElement Item, string ModId)>();
+        int? expectedTotal = null;
+        for (var page = 1; ; page++)
+        {
+            Guard.Require(page <= maximumTeamMods, "TEAM_MODS_LIMIT",
+                "当前账号的团队 mod 数量超过安全处理限制。");
+            var (data, meta) = await GetPageAsync($"team-mods?page={page}&page_size={pageSize}", ct);
+            var returnedPage = Integer(meta, "page");
+            var returnedPageSize = Integer(meta, "page_size");
+            var total = Integer(meta, "total_count");
+            Guard.Require(returnedPage == page && returnedPageSize is >= 1 and <= pageSize &&
+                total is >= 0 and <= maximumTeamMods, "API_SCHEMA", "团队 mod 分页信息无效。");
+            expectedTotal ??= total;
+            Guard.Require(expectedTotal == total, "TEAM_MODS_CHANGED", "读取候选期间团队 mod 列表发生变化；请重新查询。");
+            var items = Array(data, "mods");
+            Guard.Require(items.Length <= returnedPageSize && (items.Length > 0 || teamMods.Count == total),
+                "INCOMPLETE_TEAM_MODS", "团队 mod 分页响应不完整。");
+            foreach (var item in items)
+            {
+                var modId = Text(Property(item, "mod"), "id");
+                Guard.Id(modId);
+                Guard.Require(teamMods.All(x => x.ModId != modId), "API_SCHEMA", "团队 mod 列表含重复全局 ID。");
+                teamMods.Add((item.Clone(), modId));
+            }
+            Guard.Require(teamMods.Count <= total, "API_SCHEMA", "团队 mod 分页数量超过总数。");
+            if (teamMods.Count == total) break;
+        }
+
+        var candidates = new List<ModCandidate>();
+        foreach (var (item, modId) in teamMods)
+        {
+            if (registeredModIds.Contains(modId)) continue;
+            var mod = Property(item, "mod");
+            var status = Text(mod, "status");
+            Guard.Require(status is "published" or "not_published" or "hidden" or "under_moderation" or
+                "removed" or "removed_by_staff", "API_SCHEMA", "Nexus 返回未知 mod 状态。");
+            if (status is not ("not_published" or "hidden")) continue;
+            var fileCount = await FileGroupCountAsync(modId, ct);
+            if (fileCount != 0) continue;
+
+            var game = Property(mod, "game");
+            var gameId = Text(game, "id");
+            var gameScopedId = Text(mod, "game_scoped_id");
+            var gameDomain = Text(game, "domain_name");
+            var gameName = Text(game, "name");
+            var name = Text(mod, "name");
+            var affiliation = Text(item, "affiliation");
+            Guard.Id(gameId);
+            Guard.Id(gameScopedId);
+            Guard.Require(Regex.IsMatch(gameDomain, @"\A[a-z0-9_-]{1,100}\z", RegexOptions.CultureInvariant),
+                "API_SCHEMA", "Nexus 返回无效游戏域名。");
+            Guard.Require(affiliation is "owner" or "contributor", "API_SCHEMA", "Nexus 返回未知团队关系。");
+            Guard.Require(name.Length is > 0 and <= 500 && gameName.Length is > 0 and <= 500 &&
+                !name.Any(char.IsControl) && !gameName.Any(char.IsControl), "API_SCHEMA", "Nexus 返回无效候选名称。");
+            var candidate = new ModCandidate(modId, gameDomain, gameName, gameScopedId, gameId, name,
+                status, affiliation, fileCount);
+            Guard.PublicText(Json.Serialize(candidate), key);
+            candidates.Add(candidate);
+        }
+        return candidates.OrderBy(x => x.GameDomain, StringComparer.Ordinal)
+            .ThenBy(x => x.Name, StringComparer.Ordinal).ThenBy(x => x.ModId, StringComparer.Ordinal).ToArray();
+    }
+
+    public async Task<ModCandidate> CandidateAsync(string modId, IReadOnlySet<string> registeredModIds, CancellationToken ct)
+    {
+        Guard.Id(modId);
+        var matches = (await CandidatesAsync(registeredModIds, ct)).Where(x => x.ModId == modId).ToArray();
+        Guard.Require(matches.Length == 1, "TARGET_NOT_CANDIDATE",
+            "指定全局 modId 不是当前可登记候选；请重新运行 target candidates 或使用官方页面 URL。");
+        return matches[0];
+    }
+
+    private async Task<int> FileGroupCountAsync(string modId, CancellationToken ct)
+    {
+        var data = await SendAsync(HttpMethod.Get, $"mods/{modId}/files", null, 200, ct);
+        return Array(data, "mod_files").Length;
+    }
+
+    private static int Integer(JsonElement value, string name)
+    {
+        var field = Property(value, name);
+        Guard.Require(field.ValueKind == JsonValueKind.Number && field.TryGetInt32(out var result),
+            "API_SCHEMA", "Nexus 响应整数字段类型错误。");
+        return result;
+    }
+
     public async Task<RemoteFile[]> FilesAsync(string modId, CancellationToken ct)
     {
         Guard.Id(modId);
