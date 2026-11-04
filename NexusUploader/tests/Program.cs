@@ -7,7 +7,7 @@ using System.Text.Json;
 using NexusUploader;
 using App = NexusUploader.Program;
 
-internal static class Tests
+internal static partial class Tests
 {
     private const string Key = "test-only-fake-key-never-real-0123456789";
     private static string root = "";
@@ -383,6 +383,7 @@ internal static class Tests
                 var old = optional with { IsActive = false, Versions = [new("202", "Old", "2.0", "old_version", false)] };
                 Reject(() => Planner.Resolve(request, plan.Target with { Files = [main, old] }, plan.Package), "DUPLICATE_VERSION");
             });
+            await DescriptionTests();
             await Run("description-only dry-run is read-only and strictly validated", async () =>
             {
                 var (request, mock) = SetupInfo();
@@ -394,9 +395,9 @@ internal static class Tests
                 try { Json.Parse<UpdateInfoInput>("{\"summary\":\"not supported\"}"); throw new Exception(); } catch (JsonException) { }
                 using var api = new NexusApi(Key, true, mock, new StorageMock());
                 var plan = await InfoPlanner.PrepareAsync(request, api, default);
-                Check(plan.Request.Description == normalized.Description && plan.Fingerprint == InfoPlanner.Fingerprint(request));
+                Check(plan.Request.Description == normalized.Description && plan.Fingerprint == InfoPlanner.Fingerprint(request, plan.PageDescription));
                 Check(mock.Calls.All(c => c.Method == "GET") && !mock.InfoUpdated);
-                await RejectAsync(() => api.UpdateDescriptionAsync(request.ModId, request.Description, default), "DRY_RUN_WRITE");
+                await RejectAsync(() => api.UpdateDescriptionAsync(request.ModId, request.Description!, default), "DRY_RUN_WRITE");
                 Reject(() => InfoPlanner.CheckPlan(plan, request with { Description = "changed" }, Json.Hash(plan)), "PLAN_MISMATCH");
             });
             await Run("description-only execute patches no file or changelog state", async () =>
@@ -905,6 +906,7 @@ internal static class Tests
         public Action? BeforeUpload;
         public string? Description, PageDescription;
         public bool Empty, Published, FailChangelog, CancelUpload, DriftAfterUpload, FailReadback, InfoUpdated, FailInfoUpdate;
+        public bool IgnoreInfoUpdate;
         public int ChangelogCalls;
         private long size;
         private const string UploadId = "11111111-2222-3333-4444-555555555555";
@@ -913,6 +915,8 @@ internal static class Tests
             Check(request.RequestUri!.Host == "api.nexusmods.com" && request.Headers.GetValues("apikey").Single() == Key);
             var path = request.RequestUri.AbsolutePath;
             Calls.Add((request.Method.Method, path));
+            if (path == "/v3/mods/12345" && request.Method == HttpMethod.Get)
+                return Data(new { id = "12345", description = JsonSerializer.SerializeToElement(PageDescription, Json.Options) });
             if (path == "/v3/team-mods" && request.Method == HttpMethod.Get)
                 return Response(new
                 {
@@ -991,8 +995,8 @@ internal static class Tests
             {
                 using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
                 Check(body.RootElement.EnumerateObject().Count() == 1);
-                PageDescription = body.RootElement.GetProperty("description").GetString();
                 if (FailInfoUpdate) return Response(new { error = Key }, 500);
+                if (!IgnoreInfoUpdate) PageDescription = body.RootElement.GetProperty("description").GetString();
                 InfoUpdated = true;
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
             }

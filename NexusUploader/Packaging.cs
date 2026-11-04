@@ -25,6 +25,7 @@ internal static class Packaging
         directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
         Guard.Require(Directory.Exists(directory), "MOD_DIRECTORY", "modDirectory 必须是存在的文件夹。");
         var entries = Inventory(directory, key, ct); // Reject sensitive names before opening any source file.
+        DescriptionComposer.ReadDoc(directory, text => Guard.PublicText(text, key), required: false);
         var ini = entries.SingleOrDefault(e => e.Name.Equals("modinfo.ini", StringComparison.OrdinalIgnoreCase) && !e.Directory);
         Guard.Require(ini is not null, "MODINFO_MISSING", "mod 文件夹根目录缺少 modinfo.ini。");
         var sources = new Dictionary<string, FileStream>(StringComparer.Ordinal);
@@ -119,6 +120,11 @@ internal static class Packaging
                 Guard.Require(!attributes.HasFlag(FileAttributes.ReparsePoint), "PACKAGE_LINK", "拒绝符号链接、目录联接及其他重解析点。");
                 var isDirectory = attributes.HasFlag(FileAttributes.Directory);
                 Guard.Require(names.Add(relative), "PACKAGE_PATH", "文件夹包含大小写冲突的路径。");
+                if (relative.Equals("doc.bbcode", StringComparison.OrdinalIgnoreCase))
+                {
+                    Guard.Require(!isDirectory, "DOC_FILE", "根目录 doc.bbcode 必须是普通文件。");
+                    continue;
+                }
                 entries.Add(new(path, relative + (isDirectory ? "/" : ""), isDirectory));
                 Guard.Require(entries.Count <= 10000, "PACKAGE_LIMIT", "文件夹条目数超过 10,000。");
                 if (isDirectory) pending.Push(path);

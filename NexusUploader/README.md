@@ -1,15 +1,15 @@
 # NexusUploader
 
-供其他 Codex 任务调用的 .NET 8 命令行工具，通过 Nexus 官方 v3 API 发布文件或单独替换 mod 页面正文。发布文件时输入 mod 文件夹，工具读取 `modinfo.ini`、生成 ZIP，并自动选择新建 Main File 或添加版本。
+供其他 Codex 任务调用的 .NET 8 命令行工具，通过 Nexus 官方 v3 API 发布文件或替换 mod 页面正文。发布文件时输入 mod 文件夹，工具读取 `modinfo.ini`、生成 ZIP，并自动选择新建 Main File 或添加版本。页面正文可读取根目录 `doc.bbcode`，结合游戏与类型模板生成，并在发布文件后自动同步。
 
 ## 能力
 
 | 命令 | 功能 |
 | --- | --- |
 | `target candidates` | 获取可用于首次上传的未登记候选页面，供调用 Agent 选择 |
-| `inspect` | 按完整本地 mod 目录查询当前绑定及远端文件历史，或通过 `--mod` 按全局 `modId` / 官方页面 URL 查询远端文件历史，只发送 GET |
-| `update-file` | 首次确认时登记目录绑定；打包文件夹、分片上传、自动创建/更新 Main File、同步页面版本，可追加 changelog |
-| `update-info` | 只替换已有 mod 页面的完整 BBCode 正文，不打包或上传文件，不改标题、摘要、版本及 changelog |
+| `inspect` | 查询目录绑定、远端文件历史、当前页面 BBCode；按目录或 URL 查询时还列出该游戏可选的描述类型模板。只发送 GET |
+| `update-file` | 首次确认时登记目录绑定；打包上传并创建/更新 Main File、同步版本及可选 changelog；模板模式下自动同步页面正文 |
+| `update-info` | 从 doc.bbcode 和已选模板更新页面正文，也支持手动模式下传入完整 description；不上传文件，不改标题、摘要、版本及 changelog |
 
 文件链路参考用户指定的 Updater、[Nexus 官方 OpenAPI](https://github.com/Nexus-Mods/Vortex/blob/master/packages/nexus-api-v3/schema/openapi.yaml) 和 [Nexus 官方上传 Action](https://github.com/Nexus-Mods/upload-action)。`update-info` 使用 OpenAPI 中的官方 `editMod` 接口；该接口目前标记为 Experimental，工具严格限定为已有页面的 `description` 字段。官方可靠接口仍不支持创建 mod 页面。创建 Main File 和修改正文的前提都是 mod 页面已经存在。
 
@@ -47,6 +47,8 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | `includeRootDirectory` | 否 | 是否在 ZIP 中增加以 `modDirectory` 文件夹名命名的顶层目录；默认 `true`。设为 `false` 时文件直接放在 ZIP 根目录 |
 | `description` | 否 | 此次上传的**文件版本说明**，不修改 mod 页面正文；不从 INI 的 description 自动继承。省略或 null 时不发送此字段；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 | `changelog` | 否 | 文件发布并核验成功后，为 INI 版本号追加的 mod 更新日志；不会替换旧日志。省略或 null 时跳过此调用；显式提供时须非空、无首尾空白，最多 50,000 字符 |
+| `descriptionMode` | 否 | `template` 启用模板及上传后的正文同步；`manual` 让 update-file 只处理文件。首次未设置时保留原来的文件发布行为；后续省略时复用已保存的模式 |
+| `descriptionProfile` | 否 | 游戏内的类型模板 ID，例如 lua、pak、blueprint 或自定义类型。首次启用模板必须选择；单独提供此字段也表示选择 template 模式。manual 模式不能同时提供它 |
 
 `update-file` 请求 JSON 不接受 `operation`、`target`、`modId`、用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；操作由调用命令决定。ID/页面 URL 仅用于首次 `update-file --dry-run --mod` 或 `inspect --mod`。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行额外账号身份比对。
 
@@ -57,8 +59,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 ```json
 {
   "requestId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-  "modDirectory": "E:\\Games\\ExampleGame\\ExampleMod",
-  "description": "[b]Complete mod page description[/b]"
+  "modDirectory": "E:\\Games\\ExampleGame\\ExampleMod"
 }
 ```
 
@@ -66,9 +67,85 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | --- | --- | --- |
 | `requestId` | 是 | 本次正文修改的非空 UUID；同一次操作保留同一个 ID，用于防止重复写入 |
 | `modDirectory` | 是 | 已登记绑定的完整本地 mod 文件夹；工具内部解析为固定全局 `modId`。即使只改页面正文，也必须提供它以避免修改错误页面 |
-| `description` | 是 | 将要替换页面现有正文的完整 BBCode，须非空、无首尾空白和非法控制字符，最多 1,000,000 字符 |
+| `description` | 否 | 手动模式下可显式提供完整页面 BBCode，最多 1,000,000 字符。省略时固定读取根目录 doc.bbcode。模板模式不能提供此字段 |
+| `descriptionMode` / `descriptionProfile` | 否 | 与 update-file 相同；省略时复用该目录的已保存设置 |
 
-`update-info` 使用已经登记的目录绑定，不接受 `--mod`，也不接受 `operation`、`target`、`modId`、`summary`、标题、版本、文件说明或 changelog 字段；操作由调用命令决定。`description` 是完整页面正文，不是增量片段；成功后旧正文会被整体替换。工具无法通过当前接口读回页面正文，因此 dry-run 会显示并固化待提交的完整文本，调用任务必须在确认摘要前审核它。
+`update-info` 使用已经登记的目录绑定，不接受 `--mod`，也不接受 `operation`、`target`、`modId`、`summary`、标题、版本、文件说明或 changelog 字段。没有启用模板时，doc.bbcode 或显式 description 就是完整页面正文；启用模板时，doc.bbcode 是要被模板包裹的独立正文。工具读取远端原文，dry-run 展示修改前后的完整 BBCode，确认后整体替换并读回核验。生成结果与远端一致时跳过 PATCH。
+
+## doc.bbcode 与描述模板
+
+调用 Agent 必须在 mod 根目录维护 UTF-8 的 `doc.bbcode`，发布前重新读取并核对。功能、用法、配置、安装要求、兼容性或已知限制变化时同步更新；纯内部改动可保持原文。正文记录当前完整行为，changelog 记录本次变化。公共安装说明和公共页头页尾由 Uploader 模板维护，特殊情况写在该 mod 的独立正文里。Uploader 只读 mod 文件夹，不创建或改写说明文件。
+
+可以从 [doc.bbcode 示例](examples/doc.bbcode) 开始。允许 UTF-8 BOM 和末尾换行，发布时规范化行尾并去除首尾空白；文件不得为空，最大 2 MiB，正文及组合结果最多 1,000,000 字符。拒绝目录、符号链接、无效 UTF-8 和敏感内容；用于页面的独立正文不能残留模板占位符。使用模板或省略 update-info.description 时必须存在它；文件发布的其他模式中可以没有，但已存在的根目录 doc.bbcode 仍须通过文件校验。
+
+**根目录 doc.bbcode 始终不进入 ZIP**，不受 includeRootDirectory 或描述模式影响。只排除这个保留文件；子目录同名文件、其他 .bbcode 文件和名为 doc 的目录正常打包。删除或归档远端文件的行为不变。
+
+模板由内到外包裹正文，各文件都必须恰好包含一个 `{{content}}`，可以自由编排插入点前后的 BBCode：
+
+```text
+modDirectory/doc.bbcode
+  → descriptions/games/<gameDomain>/profiles/<profile>.bbcode
+  → descriptions/games/<gameDomain>/game.bbcode
+  → descriptions/global.bbcode
+  → 最终页面正文
+```
+
+例如一种类型模板可以包含：
+
+```bbcode
+[b]Installation[/b]
+该类型的安装说明。
+
+{{content}}
+
+[b]Uninstallation[/b]
+该类型的卸载说明。
+```
+
+路径均相对于工具目录。游戏域名来自既有目录绑定或首次绑定候选，不由调用者猜测。类型 ID 只接受小写 ASCII 字母、数字、下划线和连字符，最长 64 字符；支持 lua、pak、blueprint 和自定义组合类型，不按文件后缀自动猜测。缺少任意一层模板或插入点无效时，上传前停止。独立正文中不允许模板占位符。
+
+仓库提供通用的透传 global.bbcode，以及 examplegame 下三种类型的示例，**不是实际游戏的安装指南**。使用真实游戏前，先在其域名目录建立 game.bbcode 和正确的类型模板，核对前置工具、路径及步骤；不能把示例说明直接发布。模板可以提交 Git，禁止放入凭据。
+
+首次启用可参考 [update-file-template.example.json](examples/update-file-template.example.json)，只额外选择一次：
+
+```json
+{
+  "requestId": "11111111-2222-4333-8444-555555555555",
+  "modDirectory": "E:\\Games\\ExampleGame\\ExampleMod",
+  "descriptionMode": "template",
+  "descriptionProfile": "lua"
+}
+```
+
+成功确认后，模式、类型和最后同步正文的摘要保存在工具的 modconfig.json 中；不缓存 mod 独立正文作为后续来源。之后每次 update-file/update-info 只需 requestId 和完整 modDirectory，工具重新读取最新 doc.bbcode 及模板。不再传 modContent 或说明文件路径。显式重新指定模式/类型可以更改选择，dry-run 展示请求中的新设置，成功后才保存；dry-run 不改配置。
+
+update-file 的原 description 字段始终是文件版本说明。template 模式上传流程为：打包上传 → 发布文件 → 读回核验 → 可选 changelog → 复查正文来源及远端原文 → 同步页面正文 → 读回核验 → 保存描述设置。manual 或尚未设置模式的 update-file 不改页面正文；update-info 仍可从 doc.bbcode 单独修改正文。
+
+计划包含 `pageDescription.before`、`after`、两者摘要、来源文件摘要及 writeRequired。确认时使用已经审核的正文，模板、doc.bbcode 或远端原文变化都要求重新 dry-run；源文件变化即使不影响 ZIP，也不能忽略。上传过程中发生变化则保留已发布文件并返回部分完成，不会提交新生成的正文。未变更的正文跳过 PATCH。
+
+远端正文若偏离上次同步摘要，返回 REMOTE_DESCRIPTION_CHANGED。调用 Agent 应先用 inspect 查看完整原文，核实网页改动；只有任务明确授权接管这些改动时，才能显式传 descriptionMode 重新 dry-run，审核 before/after 后确认。不能自动重复指定模式来绕过保护。
+
+正文修改失败不能重传文件。回执的 update-description、verify-description、save-description-settings 阶段分别表示写入、读回或保存本地描述设置未全部完成。先用 inspect 核对远端；确有必要时，将仅补正文作为独立 update-info 操作处理，不能删除原回执或盲目重试原上传。
+
+### 调用 Agent 的描述维护流程
+
+1. 先阅读本说明和 AGENTS.md。已有绑定时，用 `inspect --mod-directory <完整路径>` 查看当前正文、`binding.descriptionSettings` 和可选类型模板。首次尚未绑定时，先按候选发现流程确认页面，再用 `inspect --mod <全局ID或官方URL>` 读取原正文；不要读取真实 config.json 或 modconfig.json 来查这些信息。
+2. 已有 doc.bbcode 时，先读完整内容，再根据本次功能变化同步更新。首次建立说明时，结合项目现有权威文档和远端原正文整理：保留仍然有效的功能、用法、配置、兼容性、限制、专属图片和链接等独立内容。只有确定已由所选模板覆盖的公共内容才移出独立正文，避免丢失旧页面信息或重复安装章节。
+3. 文件必须位于请求中 modDirectory 的根目录，使用真正的 BBCode；不能把 Markdown 或 HTML 原样当作已转换的正文。独立正文不含 `{{content}}`，也不保存套完模板的最终整页。若 modDirectory 是临时准备的发布目录，应在项目中持久维护说明源文件，准备发布目录时由调用方复制为根目录 doc.bbcode，不能只在临时目录或聊天记录中保存唯一版本。
+4. 修改功能、使用方式、配置或兼容性时，同时维护说明；仅改说明时使用 update-info，无需为了修改正文上传新文件。无法从项目确认的内容不编造，不把文件版本说明 description 或 changelog 当作 mod 正文的替代品。
+5. **已有 mod 绑定不代表已启用正文同步。** 用户要求文件与页面一起更新，而绑定尚未启用 template 模式时，须结合当前游戏和项目选择适配模板，在首次启用请求中提供 descriptionMode/descriptionProfile。类型无法确认时才向用户核实。缺少适配模板时停止模板发布并报告；不能把 examplegame 示例当作真实说明，也不能为单个 mod 随意修改公共模板。共享模板的修改须遵守所属项目的授权和文件范围要求。
+6. dry-run 后审核 `plan.pageDescription.before` 和 `after`，确认独立内容被保留且公共片段只出现一次。`plan.pageDescription` 不存在表示本次没有同步页面正文，不能报告“描述已更新”；writeRequired=false 表示生成结果已与远端一致，无需 PATCH。正常确认时沿用同一请求和摘要，不在确认后重新采用未经审核的模板内容。
+7. 发布完成后分别报告文件和正文结果。正文同步失败时核对回执及 inspect 的远端原文，保留已发布文件；不得重传文件或更换请求 ID 绕过未核实的失败。
+
+### 图片与 BBCode 编辑
+
+描述和模板可使用 `[img]https://公开图片直链[/img]`。模板里的公共图片可重复引用，mod 独有图片放在 doc.bbcode。拒绝本地路径、HTTP、data URL、带身份信息的 URL 和签名/凭据特征。图片必须先已有公开 HTTPS 地址；工具不上传图片，不修改 Nexus 图库，也不通过私有接口取得图片 URL。code/noparse 中的图片标签示例按文字处理。
+
+日常直接编辑 mod 的 doc.bbcode。Uploader 只在 dry-run/发布时组合公共模板，供调用 Agent 审核最终 before/after BBCode，不提供 HTML 渲染或组合预览命令。
+
+需要边编辑边预览单个 BBCode 文件时，可以使用 VS Code 的 [BBCode 扩展（JuanReateguiSolis）](https://marketplace.visualstudio.com/items?itemName=JuanReateguiSolis.bbcode-support)：打开 doc.bbcode 后按 Ctrl+K，再按 V，侧栏会随输入更新，并提供标签检查、补全和图片预览。另一选择是 [Steam Text Editor Preview](https://marketplace.visualstudio.com/items?itemName=MassimoMx.steam-text-editor-preview)，打开 .bbcode 后按 Ctrl+Shift+V。直接编辑和保存同一份 doc.bbcode 即可，开发 mod 仍可继续使用 VS2022。
+
+以上是 VS Code 扩展，不是 VS2022 扩展。尚未找到可确认支持 VS2022 的专用 BBCode 实时预览插件；Preview-HTML/HTML 11 只处理 HTML。不同平台的 BBCode 方言和样式存在差异，这些编辑器预览不保证与 Nexus 完全一致。扩展均未由本项目安装或实测；不要仅因编辑器能够预览本地图片，就把本地路径写入发布正文。
 
 ## 文件夹与 modinfo.ini
 
@@ -146,7 +223,7 @@ pwsh -NoProfile -File $tool update-info `
 
 已有目录绑定时，即使 ID 相同也拒绝传入 `--mod`；目录键或全局 ID 已存在时禁止覆盖或重复登记。首次计划确认前若有其他任务完成登记，返回 TARGET_EXISTS，须去掉 --mod 重新 dry-run。绑定保存与远端上传不是同一个事务：保存后上传失败时保留绑定和回执，不能把已有绑定视为上传成功，也不能删除回执或更换 requestId 重试。
 
-`inspect` 必须且只能选择统一的 `--mod` 或 `--mod-directory`。`--mod-directory` 由工具内部查绑定，输出 `binding`（目录键、INI 名称、登记时的页面名称、游戏域名及各 ID）和 `target`（远端文件及全部版本历史），仅返回当前目录的绑定。`--mod` 为纯数字时按全局 v3 ID 处理，为官方页面 URL 时先解析；URL 结果还输出不含原始 URL/查询参数的 `resolution`。直接按 ID/URL 查询不读取本地绑定，也不输出 `binding`。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。仅支持上表命令的写法，不提供连字符形式的 target 命令别名。
+`inspect` 必须且只能选择统一的 `--mod` 或 `--mod-directory`。`--mod-directory` 输出当前目录的 binding 和完整文件历史 target，binding 含描述模式、类型及最后同步摘要。`--mod` 为纯数字时按全局 v3 ID 处理，为官方页面 URL 时先解析并输出不含原始 URL/查询参数的 resolution；直接按 ID/URL 查询不读取绑定。两种方式都返回当前远端 BBCode description（无正文时可能省略），按目录或 URL 查询还列出本地 descriptionProfiles，纯全局 ID 查询不猜测游戏域名。只有当前绑定被返回。只读查询成功不代表具有写权限，实际权限由 Nexus 写接口判定。
 
 ### 面向调用 Agent 的首次登记流程
 
@@ -181,7 +258,7 @@ pwsh -NoProfile -File $tool update-info `
 | 缺少绑定时获取候选 | `target candidates` | 仅在上述调用返回 TARGET_NOT_FOUND / MODCONFIG_MISSING 时使用，由 Agent 选择可确认的页面 |
 | 首次提出绑定 | `update-file --request <同一JSON> --dry-run --mod <ID或URL>` | 重新生成含首次绑定方案的计划；此时不保存绑定 |
 | 审查计划 | 无需额外接口 | 审核目标 modId、ZIP 结构、版本、自动动作及拟发布文本，保留 planSha256 |
-| 上传发布 | `update-file --request <同一JSON> --confirm <planSha256>` | 复核计划、重新打包并复查远端；首次保存已确认绑定，再分片上传、创建/更新 Main File、读回验证后追加可选 changelog |
+| 上传发布 | `update-file --request <同一JSON> --confirm <planSha256>` | 复核计划、重新打包并复查远端；首次保存绑定，再上传、创建/更新 Main File、读回验证、可选 changelog，模板模式下最后同步并核验正文 |
 | 成功后收尾 | 无需额外接口 | 返回成功回执及 cleanup 统计，自动清理符合条件的旧计划并退出 |
 | 异常核对 | `inspect --mod-directory <full-path>` 或 `inspect --mod <全局ID或URL>` | 配合回执核对远端文件历史；正常发布不要求额外调用 inspect，退出码 4 禁止盲目重试 |
 
@@ -189,7 +266,7 @@ pwsh -NoProfile -File $tool update-info `
 
 成功执行后，输出还包含 `cleanup`，记录删除计划数、删除空目录数、保留计划数及清理失败项数。存在无法清理的项时附带 `warningCode: CLEANUP_INCOMPLETE`；发布仍保持 `status: success` 和退出码 0，不能因此重新上传或重新修改正文。
 
-`update-info` 读取 `modinfo.ini` 校验目录绑定，执行前再次确认目标可读取，然后只发送一次正文修改请求。官方接口成功时返回 HTTP 204；当前接口没有提供正文读回核验。写请求发出后的超时、取消或非预期响应都按不确定结果处理，返回退出码 4 并要求人工核对，不能直接重试。该操作不会打包、上传或修改文件版本和 changelog。
+`update-info` 读取 modinfo.ini 校验目录绑定，执行前复查正文来源和远端原文。正文不同时发送一次 PATCH，成功后 GET 读回核验；相同则跳过 PATCH 并核对现状。HTTP 204 不是最终的正文一致性依据。写请求发出后的超时、取消、非预期响应或核验失败返回退出码 4，不能直接重试。成功后保存描述设置及同步摘要。该操作不打包、不上传、不修改文件版本和 changelog。
 
 dry-run 会把派生的 `directoryKey` 及当时解析出的全局 `modId` 一并写入计划。执行前重新读取 `modconfig.json`；如果目录绑定改为另一个 modId，请求与计划将不匹配并停止。执行还会重新读取 INI、重新打包并比较计划中的包信息。修改、增加、删除或重命名源文件，改版本，改请求，或远端文件历史变化，都必须重新 dry-run。工具对每个 modId 使用同一安装目录中的互斥锁，所有调用任务应共用该目录。
 
@@ -202,7 +279,7 @@ dry-run 会把派生的 `directoryKey` 及当时解析出的全局 `modId` 一�
 - 上传合并不仅检查 HTTP 200，还核验 S3 完成 XML。关联文件前再查远端状态，关联后读回主要版本，最后才写 changelog。
 - 更新文件时以发布响应的 `version.id` 定位新版本，读回目标 mod 的完整历史，核对它属于计划中的文件组且名称、版本、分类、主要下载状态均正确。写响应的 `file.id` 单独记为诊断字段，不用它直接判定文件组归属；读回归属错误仍返回 `PUBLISH_MISMATCH`，核验不通过不会写 changelog。
 - 首次创建 Main File 时，Nexus 的顶层响应 ID 可能表示新版本或文件组。工具不根据该字段猜测类型，而是读回完整历史，要求名称、版本、分类、主要下载状态唯一匹配，并要求响应 ID 与读回的版本 ID 或文件组 ID 至少一个一致。回执最终记录读回确认的真实版本 ID 和文件组 ID。
-- 没有自动网络重试。先持久化回执再发第一个写请求；文件发布与 changelog 不是原子事务，外部调用仍可能在最终检查后并发修改。
+- 没有自动网络重试。先持久化回执再发第一个写请求；文件发布、changelog、正文和本地设置保存不是原子事务，外部调用仍可能在最终检查后并发修改。
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -244,4 +321,4 @@ dry-run 会把派生的 `directoryKey` 及当时解析出的全局 `modId` 一�
 dotnet run --project .\NexusUploader\tests\NexusUploader.Tests.csproj
 ```
 
-使用合成文件夹、临时凭据与内存 HTTP handlers，不访问真实 Nexus，不读取真实配置，不启动浏览器。覆盖候选筛选及只读约束、目录绑定、自动计划存取及防篡改、自动打包/选目标、单独修改正文、INI、敏感内容、目录联接、源内容及远端变化、分片/读回/同步信息、互斥与部分失败，以及旧参数和不支持操作的拒绝。
+使用合成文件夹、临时凭据与内存 HTTP handlers，不访问真实 Nexus，不读取真实配置，不启动浏览器。覆盖候选筛选及只读约束、目录绑定、自动计划存取及防篡改、自动打包/选目标、根目录说明文件排除、模板包裹组合及保存复用、正文差异和回读、INI、敏感内容、目录联接、源内容及远端变化、分片上传、互斥与部分失败，以及已移除接口、旧参数和不支持操作的拒绝。

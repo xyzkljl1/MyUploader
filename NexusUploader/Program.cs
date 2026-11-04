@@ -112,7 +112,7 @@ internal static class Program
         if (args.Length == 0 || args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
-                NexusUploader 1.9 — automation CLI (.NET 8, JSON stdout)
+                NexusUploader 1.11 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
                 target candidates
@@ -123,7 +123,12 @@ internal static class Program
                 update-info --request <same JSON> --confirm <planSha256>
 
                 update-file request: requestId, modDirectory; optional includeRootDirectory (default true), description/changelog.
-                update-info request: requestId, modDirectory, description (full mod page BBCode).
+                update-info request: requestId, modDirectory; reads root doc.bbcode, or explicit full description in manual mode.
+                Both requests: optional descriptionMode (template/manual), descriptionProfile; remembered after success.
+                Template mode: doc.bbcode -> game type wrapper -> game wrapper -> global wrapper; one {{content}} per wrapper.
+                update-file in template mode synchronizes the page after verified file/changelog publication.
+                Only root doc.bbcode is excluded from every ZIP; callers maintain it with user-facing feature changes.
+                inspect includes current page description and available game profiles for reconciliation.
                 inspect --mod-directory returns the registered binding plus remote file/version history.
                 First upload: --mod is allowed only for an unbound directory; dry-run proposes a binding, confirmation saves it.
                 Mode: exactly one of --dry-run or --confirm <planSha256>; no default mode or --execute option.
@@ -171,7 +176,7 @@ internal static class Program
             var request = ModRegistry.Bind(input, modConfigPath);
             if (dryRun)
             {
-                var plan = await InfoPlanner.PrepareAsync(request, client, ct);
+                var plan = await InfoPlanner.PrepareAsync(request, client, ct, DescriptionComposer.RootFor(modConfigPath));
                 var planSha256 = PlanStore.Save(stateDirectory, plan);
                 Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256, plan }));
             }
@@ -179,7 +184,7 @@ internal static class Program
             {
                 var plan = PlanStore.Read<UpdateInfoPlan>(stateDirectory, request.RequestId, flags["--confirm"]);
                 var receipt = await InfoPublisher.ExecuteAsync(plan, request,
-                    flags["--confirm"], client, stateDirectory, ct);
+                    flags["--confirm"], client, stateDirectory, ct, modConfigPath);
                 Console.WriteLine(Json.Serialize(CompletePublication(receipt, stateDirectory)));
             }
         }
@@ -232,7 +237,10 @@ internal static class Program
             }
         }
         var target = await api.InspectAsync(modId, ct);
-        var result = new InspectionResult("inspected", resolution, binding, target);
+        var description = await api.DescriptionAsync(modId, ct);
+        var domain = binding?.GameDomain ?? resolution?.GameDomain;
+        var profiles = domain is null ? null : DescriptionComposer.Profiles(DescriptionComposer.RootFor(modConfigPath), domain);
+        var result = new InspectionResult("inspected", resolution, binding, target, description, profiles);
         Guard.PublicText(Json.Serialize(result), key);
         return result;
     }

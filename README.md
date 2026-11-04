@@ -6,5 +6,5 @@
 
 | 工具 | 用途 | 调用说明 |
 | --- | --- | --- |
-| NexusUploader | 通过官方 API 发布 Nexus Mods 文件 | [README](NexusUploader/README.md)、[任务入口](NexusUploader/AGENTS.md) |
+| NexusUploader | 通过官方 API 发布 Nexus Mods 文件、从本地 BBCode 和模板同步描述 | [README](NexusUploader/README.md)、[任务入口](NexusUploader/AGENTS.md) |
 | biliUploader | 通过固定版本 biliup 库创建和更新 Bilibili 稿件 | [README](biliUploader/README.md)、[任务入口](biliUploader/AGENTS.md) |

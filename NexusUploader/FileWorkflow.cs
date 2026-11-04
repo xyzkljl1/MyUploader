@@ -6,7 +6,8 @@ internal static class FileWorkflow
         NexusApi api, string key, CancellationToken ct)
     {
         if (mod is null)
-            return await Planner.PrepareAsync(ModRegistry.Bind(input, registryPath), api, key, ct);
+            return await Planner.PrepareAsync(ModRegistry.Bind(input, registryPath), api, key, ct,
+                templateRoot: DescriptionComposer.RootFor(registryPath));
 
         Guard.PublicText(mod, key);
         var identity = ModDirectoryIdentity.Read(input.ModDirectory);
@@ -22,7 +23,8 @@ internal static class FileWorkflow
             resolution.GameDomain, resolution.GameScopedId, resolution.ModId, resolution.GameId, DateTimeOffset.UtcNow);
         var proposal = new BindingProposal(numeric ? "candidate" : "url", target);
         Guard.PublicText(Json.Serialize(proposal), key);
-        return await Planner.PrepareAsync(ModRegistry.Bind(input, target), api, key, ct, proposal);
+        return await Planner.PrepareAsync(ModRegistry.Bind(input, target), api, key, ct, proposal,
+            DescriptionComposer.RootFor(registryPath));
     }
 
     public static Request BindForConfirmation(UpdateFileInput input, Plan plan, string registryPath)

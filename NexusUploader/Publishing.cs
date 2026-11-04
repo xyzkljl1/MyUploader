@@ -4,9 +4,10 @@ namespace NexusUploader;
 
 internal static class Planner
 {
-    public const string Version = "1.3";
+    public const string Version = "1.4";
     public static string Fingerprint(Request request, Target target, PackageInfo package, FileIntent intent,
-        BindingProposal? registration = null) => Json.Hash(new { toolVersion = Version, request, target, package, intent, registration });
+        BindingProposal? registration = null, DescriptionPlan? pageDescription = null) =>
+        Json.Hash(new { toolVersion = Version, request, target, package, intent, registration, pageDescription });
 
     public static FileIntent Resolve(Request request, Target target, PackageInfo package)
     {
@@ -21,22 +22,25 @@ internal static class Planner
     }
 
     public static async Task<Plan> PrepareAsync(Request request, NexusApi api, string key, CancellationToken ct,
-        BindingProposal? registration = null)
+        BindingProposal? registration = null, string? templateRoot = null)
     {
         using var package = await Packaging.BuildAsync(request.ModDirectory, key, request.IncludeRootDirectory, ct);
         var target = await api.InspectAsync(request.ModId, ct);
         var intent = Resolve(request, target, package.Info);
+        var description = request.PageDescription?.Settings?.Mode == "template" ?
+            await DescriptionComposer.PrepareAsync(request.ModDirectory, request.ModId, request.PageDescription,
+                api, templateRoot ?? DescriptionComposer.DefaultRoot, ct) : null;
         Guard.PublicText(Json.Serialize(new { target, package = package.Info, intent }), key);
         var now = DateTimeOffset.UtcNow;
         return new(Version, now, now.AddMinutes(15), request, target, package.Info, intent,
-            Fingerprint(request, target, package.Info, intent, registration), registration);
+            Fingerprint(request, target, package.Info, intent, registration, description), registration, description);
     }
 
     public static void CheckPlan(Plan plan, Request request, string confirmation)
     {
         Guard.Require(plan.ToolVersion == Version && Json.Hash(request) == Json.Hash(plan.Request), "PLAN_MISMATCH", "工具版本或请求已变化，必须重新 dry-run。");
         Guard.Require(plan.CreatedAt <= DateTimeOffset.UtcNow && plan.ExpiresAt > DateTimeOffset.UtcNow && plan.ExpiresAt - plan.CreatedAt == TimeSpan.FromMinutes(15), "PLAN_EXPIRED", "计划已过期或时间无效，必须重新 dry-run。");
-        Guard.Require(plan.Fingerprint == Fingerprint(request, plan.Target, plan.Package, plan.Intent, plan.Registration) && confirmation == Json.Hash(plan), "PLAN_CONFIRMATION", "计划被更改或 --confirm 不匹配；必须确认 dry-run 返回的完整 planSha256。");
+        Guard.Require(plan.Fingerprint == Fingerprint(request, plan.Target, plan.Package, plan.Intent, plan.Registration, plan.PageDescription) && confirmation == Json.Hash(plan), "PLAN_CONFIRMATION", "计划被更改或 --confirm 不匹配；必须确认 dry-run 返回的完整 planSha256。");
     }
 }
 
@@ -98,11 +102,17 @@ internal static class Publisher
     {
         Planner.CheckPlan(plan, request, confirm);
         using var journal = new Journal(stateDirectory, request);
+        if (registryPath is not null && plan.Registration is null)
+            ModRegistry.CheckDescriptionBinding(registryPath, request.ModDirectory, request.ModId, request.PageDescription);
         using var package = await Packaging.BuildAsync(request.ModDirectory, key, request.IncludeRootDirectory, ct);
         Guard.Require(Json.Hash(package.Info) == Json.Hash(plan.Package), "PACKAGE_CHANGED", "文件夹内容或 modinfo.ini 已变化，必须重新 dry-run。");
         var target = await api.InspectAsync(request.ModId, ct);
         var intent = Planner.Resolve(request, target, package.Info);
-        Guard.Require(Planner.Fingerprint(request, target, package.Info, intent, plan.Registration) == plan.Fingerprint, "REMOTE_CHANGED", "Nexus 文件状态已变化，必须重新 dry-run；不会静默切换创建/更新动作。");
+        Guard.Require(Planner.Fingerprint(request, target, package.Info, intent, plan.Registration, plan.PageDescription) == plan.Fingerprint, "REMOTE_CHANGED", "Nexus 文件状态已变化，必须重新 dry-run；不会静默切换创建/更新动作。");
+        var templateRoot = DescriptionComposer.RootFor(registryPath);
+        if (plan.PageDescription is not null)
+            await DescriptionComposer.CheckAsync(plan.PageDescription, request.ModDirectory, request.ModId,
+                request.PageDescription, api, templateRoot, ct);
         if (plan.Registration is not null)
         {
             Guard.Require(registryPath is not null, "BINDING_PROPOSAL", "执行首次绑定计划时缺少工具内部的绑定存储位置。");
@@ -126,6 +136,16 @@ internal static class Publisher
             var verified = VerifyPublished(files, package.Info, intent, published);
             journal.Set("partial", "changelog", publishedId: verified.VersionId, targetFileId: verified.FileId);
             await api.ChangelogAsync(request, package.Info.Version, ct);
+            if (plan.PageDescription is not null)
+                await DescriptionComposer.PublishAsync(plan.PageDescription, request.ModDirectory, request.ModId,
+                    request.PageDescription, api, templateRoot, journal, ct);
+            if (registryPath is not null && request.PageDescription is { } context &&
+                (context.Settings != context.PreviousSettings || plan.PageDescription is not null))
+            {
+                journal.Set("partial", "save-description-settings");
+                ModRegistry.SaveDescription(registryPath, request.DirectoryKey, request.ModId,
+                    context, plan.PageDescription?.AfterSha256);
+            }
             journal.Set("success", "complete");
             return journal.Current;
         }

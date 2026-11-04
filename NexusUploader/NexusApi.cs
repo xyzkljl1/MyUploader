@@ -337,6 +337,21 @@ internal sealed class NexusApi : IDisposable
         Guard.Id(modId);
         await SendAsync(HttpMethod.Patch, $"mods/{modId}", new { description }, 204, ct);
     }
+
+    internal void Protect(string text) => Guard.PublicText(text, key);
+
+    public async Task<string?> DescriptionAsync(string modId, CancellationToken ct)
+    {
+        Guard.Id(modId);
+        var data = await SendAsync(HttpMethod.Get, $"mods/{modId}", null, 200, ct);
+        Guard.Require(Text(data, "id") == modId, "MOD_MISMATCH", "描述响应属于其他 mod。");
+        var field = Property(data, "description");
+        Guard.Require(field.ValueKind is JsonValueKind.String or JsonValueKind.Null, "API_SCHEMA", "页面正文类型无效。");
+        var text = field.ValueKind == JsonValueKind.Null ? null : field.GetString();
+        Guard.Require(text is null || text.Length <= 1_000_000, "DESCRIPTION", "远端正文超过长度限制。");
+        if (text is not null) Protect(text);
+        return text;
+    }
 }
 
 // Streams a bounded part without buffering the whole part/archive or closing the locked archive.

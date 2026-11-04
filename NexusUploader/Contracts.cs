@@ -20,13 +20,17 @@ internal sealed record UpdateFileInput
     public bool IncludeRootDirectory { get; init; } = true;
     public string? Description { get; init; }
     public string? Changelog { get; init; }
+    public string? DescriptionMode { get; init; }
+    public string? DescriptionProfile { get; init; }
 }
 
 internal sealed record UpdateInfoInput
 {
     public string RequestId { get; init; } = "";
     public string ModDirectory { get; init; } = "";
-    public string Description { get; init; } = "";
+    public string? Description { get; init; }
+    public string? DescriptionMode { get; init; }
+    public string? DescriptionProfile { get; init; }
 }
 
 internal sealed record Request
@@ -39,6 +43,7 @@ internal sealed record Request
     public bool IncludeRootDirectory { get; init; } = true;
     public string? Description { get; init; }
     public string? Changelog { get; init; }
+    public DescriptionContext? PageDescription { get; init; }
 }
 
 internal sealed record UpdateInfoRequest
@@ -48,15 +53,25 @@ internal sealed record UpdateInfoRequest
     public string ModId { get; init; } = "";
     public string DirectoryKey { get; init; } = "";
     public string ModDirectory { get; init; } = "";
-    public string Description { get; init; } = "";
+    public string? Description { get; init; }
+    public DescriptionContext? PageDescription { get; init; }
 }
+
+internal sealed record DescriptionSettings(string Mode, string? Profile = null);
+internal sealed record DescriptionContext(string GameDomain, DescriptionSettings? Settings,
+    DescriptionSettings? PreviousSettings, string? PreviousSha256, bool ExplicitSettings);
+internal sealed record DescriptionSource(string Path, string Sha256);
+internal sealed record RenderedDescription(string Text, DescriptionSource[] Sources);
+internal sealed record DescriptionPlan(string? Before, string After, string BeforeSha256, string AfterSha256,
+    DescriptionSource[] Sources, bool WriteRequired);
 
 internal sealed record FileVersion(string Id, string Name, string Version, string Category, bool IsPrimary);
 internal sealed record RemoteFile(string Id, string Name, bool IsActive, FileVersion[] Versions);
 internal sealed record Target(string ModId, RemoteFile[] Files);
 internal sealed record ModPageReference(string GameDomain, string GameScopedId);
 internal sealed record ModResolution(string GameDomain, string GameScopedId, string ModId, string GameId, string PageName);
-internal sealed record InspectionResult(string Status, ModResolution? Resolution, ModTarget? Binding, Target Target);
+internal sealed record InspectionResult(string Status, ModResolution? Resolution, ModTarget? Binding, Target Target,
+    string? Description = null, string[]? DescriptionProfiles = null);
 internal sealed record ModCandidate(string ModId, string GameDomain, string GameName, string GameScopedId,
     string GameId, string Name, string Status, string Affiliation, int FileCount)
 {
@@ -68,9 +83,9 @@ internal sealed record FileIntent(string Action, string? FileId, string Name, st
 internal sealed record BindingProposal(string Source, ModTarget Target);
 internal sealed record Plan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
     Request Request, Target Target, PackageInfo Package, FileIntent Intent, string Fingerprint,
-    BindingProposal? Registration = null);
+    BindingProposal? Registration = null, DescriptionPlan? PageDescription = null);
 internal sealed record UpdateInfoPlan(string ToolVersion, DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt,
-    UpdateInfoRequest Request, string Fingerprint);
+    UpdateInfoRequest Request, string Fingerprint, DescriptionPlan? PageDescription = null);
 internal sealed record PublishResult(string PublishedId, string ResponseFileId);
 internal sealed record VerifiedPublish(string VersionId, string FileId);
 internal sealed record Receipt(string RequestId, string Status, string Stage, string? UploadId = null,
@@ -179,6 +194,7 @@ internal static class Guard
         PublicText(Json.Serialize(request), apiKey);
         if (request.Description is not null) Text(request.Description, 50000, "DESCRIPTION");
         if (request.Changelog is not null) Text(request.Changelog, 50000, "CHANGELOG");
+        DescriptionComposer.ValidateSelection(request.DescriptionMode, request.DescriptionProfile);
         Text(request.ModDirectory, 4096, "MOD_DIRECTORY");
         var directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(request.ModDirectory, baseDirectory));
         Require(!directory.StartsWith(@"\\", StringComparison.Ordinal) && Directory.Exists(directory), "MOD_DIRECTORY", "modDirectory 必须是存在的本地文件夹。");
@@ -192,7 +208,8 @@ internal static class Guard
         Require(Guid.TryParseExact(request.RequestId, "D", out var requestId) && requestId != Guid.Empty,
             "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
         PublicText(Json.Serialize(request), apiKey);
-        Text(request.Description, 1_000_000, "DESCRIPTION");
+        if (request.Description is not null) Text(request.Description, 1_000_000, "DESCRIPTION");
+        DescriptionComposer.ValidateSelection(request.DescriptionMode, request.DescriptionProfile);
         Text(request.ModDirectory, 4096, "MOD_DIRECTORY");
         var directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(request.ModDirectory, baseDirectory));
         Require(!directory.StartsWith(@"\\", StringComparison.Ordinal) && Directory.Exists(directory), "MOD_DIRECTORY", "modDirectory 必须是存在的本地文件夹。");

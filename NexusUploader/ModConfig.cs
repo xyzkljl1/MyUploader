@@ -9,7 +9,8 @@ internal sealed record ModConfig
 }
 
 internal sealed record ModTarget(string DirectoryKey, string LocalModName, string? PageName,
-    string GameDomain, string GameScopedId, string ModId, string GameId, DateTimeOffset VerifiedAt);
+    string GameDomain, string GameScopedId, string ModId, string GameId, DateTimeOffset VerifiedAt,
+    DescriptionSettings? DescriptionSettings = null, string? DescriptionSha256 = null);
 
 internal static class ModDirectoryIdentity
 {
@@ -33,10 +34,12 @@ internal static class ModDirectoryIdentity
 
     internal static (string Name, string Version) ReadMetadata(string path)
     {
+        PlanStore.CheckLinks(path);
         Guard.Require(File.Exists(path), "MODINFO_MISSING", "mod 文件夹根目录缺少 modinfo.ini。");
         var info = new FileInfo(path);
         Guard.Require(info.Length <= 1024 * 1024, "MODINFO_INVALID", "modinfo.ini 超过 1 MiB 上限。");
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        PlanStore.CheckLinks(path);
         using var reader = new StreamReader(stream, new UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: false);
         var raw = reader.ReadToEnd().TrimStart('\uFEFF');
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -86,6 +89,7 @@ internal static class ModRegistry
 
     public static ModConfig Load(string path, bool allowMissing = false)
     {
+        PlanStore.CheckLinks(path);
         if (!File.Exists(path))
         {
             Guard.Require(allowMissing, "MODCONFIG_MISSING", "modconfig.json 不存在；请运行 target candidates，并在首次 update-file --dry-run 时传入 --mod。");
@@ -125,14 +129,44 @@ internal static class ModRegistry
     {
         return new() { RequestId = request.RequestId, Operation = "update-file", ModId = target.ModId,
             DirectoryKey = target.DirectoryKey, ModDirectory = request.ModDirectory,
-            IncludeRootDirectory = request.IncludeRootDirectory, Description = request.Description, Changelog = request.Changelog };
+            IncludeRootDirectory = request.IncludeRootDirectory, Description = request.Description, Changelog = request.Changelog,
+            PageDescription = DescriptionComposer.Context(target, request.DescriptionMode, request.DescriptionProfile) };
     }
 
     public static UpdateInfoRequest Bind(UpdateInfoInput request, string path)
     {
         var target = Find(path, request.ModDirectory);
         return new() { RequestId = request.RequestId, Operation = "update-info", ModId = target.ModId,
-            DirectoryKey = target.DirectoryKey, ModDirectory = request.ModDirectory, Description = request.Description };
+            DirectoryKey = target.DirectoryKey, ModDirectory = request.ModDirectory, Description = request.Description,
+            PageDescription = DescriptionComposer.Context(target, request.DescriptionMode, request.DescriptionProfile) };
+    }
+
+    internal static void SaveDescription(string path, string directoryKey, string modId,
+        DescriptionContext context, string? sha256)
+    {
+        PlanStore.CheckLinks(path);
+        PlanStore.CheckLinks(path + ".lock");
+        using var gate = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        PlanStore.CheckLinks(path + ".lock");
+        var config = Load(path);
+        var matches = config.Targets.Where(t => t.DirectoryKey == directoryKey && t.ModId == modId).ToArray();
+        Guard.Require(matches.Length == 1, "BINDING_CHANGED", "保存描述状态时目录绑定已变化。");
+        var target = matches[0];
+        Guard.Require(target.DescriptionSettings == context.PreviousSettings && target.DescriptionSha256 == context.PreviousSha256,
+            "DESCRIPTION_SETTINGS_CHANGED", "描述设置或同步记录已变化；保留回执并核对，禁止覆盖。");
+        var updated = target with { DescriptionSettings = context.Settings,
+            DescriptionSha256 = sha256 ?? target.DescriptionSha256 };
+        if (updated != target)
+            WriteReplacement(path, config with { Targets = config.Targets.Select(t => t == target ? updated : t).ToArray() });
+    }
+
+    internal static void CheckDescriptionBinding(string path, string directory, string modId, DescriptionContext? context)
+    {
+        var target = Find(path, directory);
+        Guard.Require(target.ModId == modId && (context is null ||
+            (target.GameDomain == context.GameDomain && target.DescriptionSettings == context.PreviousSettings &&
+             target.DescriptionSha256 == context.PreviousSha256)), "BINDING_CHANGED",
+            "目录绑定或描述设置在执行前已变化；未写入，必须重新 dry-run。");
     }
 
     public static ModTarget Add(string path, string modDirectory, ModResolution resolution)
@@ -180,6 +214,7 @@ internal static class ModRegistry
 
     private static void WriteReplacement(string path, ModConfig config)
     {
+        PlanStore.CheckLinks(path);
         foreach (var target in config.Targets) Validate(target);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -207,6 +242,15 @@ internal static class ModRegistry
         Guard.Require(Regex.IsMatch(target.GameDomain, @"\A[a-z0-9_-]{1,100}\z", RegexOptions.CultureInvariant),
             "MODCONFIG_INVALID", "modconfig.json 含无效游戏域名。");
         Guard.Id(target.GameScopedId); Guard.Id(target.ModId); Guard.Id(target.GameId);
+        if (target.DescriptionSettings is { } settings)
+        {
+            Guard.Require(settings.Mode is "manual" or "template", "MODCONFIG_INVALID", "已保存描述模式无效。");
+            DescriptionComposer.ValidateSelection(settings.Mode, settings.Profile);
+            Guard.Require(settings.Mode != "template" || settings.Profile is not null,
+                "MODCONFIG_INVALID", "模板模式缺少类型模板。");
+        }
+        Guard.Require(target.DescriptionSha256 is null || Regex.IsMatch(target.DescriptionSha256, @"\A[0-9a-f]{64}\z"),
+            "MODCONFIG_INVALID", "描述同步摘要无效。");
         Guard.Require(target.VerifiedAt > DateTimeOffset.UnixEpoch && target.VerifiedAt <= DateTimeOffset.UtcNow.AddMinutes(5),
             "MODCONFIG_INVALID", "modconfig.json 含无效验证时间。");
     }
