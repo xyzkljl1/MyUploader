@@ -13,12 +13,30 @@ internal sealed class SafeException(string code, string message, int exitCode = 
     public int ExitCode { get; } = exitCode;
 }
 
+internal sealed record UpdateFileInput
+{
+    public string RequestId { get; init; } = "";
+    public string Operation { get; init; } = "";
+    public string ModDirectory { get; init; } = "";
+    public bool IncludeRootDirectory { get; init; } = true;
+    public string? Description { get; init; }
+    public string? Changelog { get; init; }
+}
+
+internal sealed record UpdateInfoInput
+{
+    public string RequestId { get; init; } = "";
+    public string Operation { get; init; } = "";
+    public string ModDirectory { get; init; } = "";
+    public string Description { get; init; } = "";
+}
+
 internal sealed record Request
 {
     public string RequestId { get; init; } = "";
     public string Operation { get; init; } = "";
     public string ModId { get; init; } = "";
-    public string? Target { get; init; }
+    public string DirectoryKey { get; init; } = "";
     public string ModDirectory { get; init; } = "";
     public bool IncludeRootDirectory { get; init; } = true;
     public string? Description { get; init; }
@@ -30,7 +48,8 @@ internal sealed record UpdateInfoRequest
     public string RequestId { get; init; } = "";
     public string Operation { get; init; } = "";
     public string ModId { get; init; } = "";
-    public string? Target { get; init; }
+    public string DirectoryKey { get; init; } = "";
+    public string ModDirectory { get; init; } = "";
     public string Description { get; init; } = "";
 }
 
@@ -38,11 +57,11 @@ internal sealed record FileVersion(string Id, string Name, string Version, strin
 internal sealed record RemoteFile(string Id, string Name, bool IsActive, FileVersion[] Versions);
 internal sealed record Target(string ModId, RemoteFile[] Files);
 internal sealed record ModPageReference(string GameDomain, string GameScopedId);
-internal sealed record ModResolution(string GameDomain, string GameScopedId, string ModId, string GameId);
+internal sealed record ModResolution(string GameDomain, string GameScopedId, string ModId, string GameId, string PageName);
 internal sealed record ModCandidate(string ModId, string GameDomain, string GameName, string GameScopedId,
     string GameId, string Name, string Status, string Affiliation, int FileCount)
 {
-    public ModResolution Resolution => new(GameDomain, GameScopedId, ModId, GameId);
+    public ModResolution Resolution => new(GameDomain, GameScopedId, ModId, GameId, Name);
 }
 internal sealed record PackageInfo(string Name, string Version, string ArchiveName, long SizeBytes, string Sha256,
     int FileCount, string? RootDirectory);
@@ -158,14 +177,12 @@ internal static class Guard
             "SECRET_IN_INPUT", "公开内容包含凭据或签名 URL 特征；拒绝输出和上传。");
     }
 
-    public static Request Validate(Request request, string operation, string baseDirectory, string apiKey)
+    public static UpdateFileInput Validate(UpdateFileInput request, string operation, string baseDirectory, string apiKey)
     {
         Require(request.Operation == operation && operation == "update-file", "OPERATION", "operation 必须为受支持的 update-file 命令。");
         Require(Guid.TryParseExact(request.RequestId, "D", out var requestId) && requestId != Guid.Empty,
             "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
         PublicText(Json.Serialize(request), apiKey);
-        Id(request.ModId);
-        if (request.Target is not null) TargetName(request.Target);
         if (request.Description is not null) Text(request.Description, 50000, "DESCRIPTION");
         if (request.Changelog is not null) Text(request.Changelog, 50000, "CHANGELOG");
         Text(request.ModDirectory, 4096, "MOD_DIRECTORY");
@@ -176,17 +193,18 @@ internal static class Guard
         return normalized;
     }
 
-    public static UpdateInfoRequest Validate(UpdateInfoRequest request, string operation, string apiKey)
+    public static UpdateInfoInput Validate(UpdateInfoInput request, string operation, string baseDirectory, string apiKey)
     {
         Require(request.Operation == operation && operation == "update-info", "OPERATION",
             "operation 必须为受支持的 update-info 命令。");
         Require(Guid.TryParseExact(request.RequestId, "D", out var requestId) && requestId != Guid.Empty,
             "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
         PublicText(Json.Serialize(request), apiKey);
-        Id(request.ModId);
-        if (request.Target is not null) TargetName(request.Target);
         Text(request.Description, 1_000_000, "DESCRIPTION");
-        var normalized = request with { RequestId = requestId.ToString("D") };
+        Text(request.ModDirectory, 4096, "MOD_DIRECTORY");
+        var directory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(request.ModDirectory, baseDirectory));
+        Require(!directory.StartsWith(@"\\", StringComparison.Ordinal) && Directory.Exists(directory), "MOD_DIRECTORY", "modDirectory 必须是存在的本地文件夹。");
+        var normalized = request with { RequestId = requestId.ToString("D"), ModDirectory = directory };
         PublicText(Json.Serialize(normalized), apiKey);
         return normalized;
     }

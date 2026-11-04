@@ -4,7 +4,7 @@ namespace NexusUploader;
 
 internal static class Planner
 {
-    public const string Version = "1.1";
+    public const string Version = "1.2";
     public static string Fingerprint(Request request, Target target, PackageInfo package, FileIntent intent) => Json.Hash(new { toolVersion = Version, request, target, package, intent });
 
     public static FileIntent Resolve(Request request, Target target, PackageInfo package)

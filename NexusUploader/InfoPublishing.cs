@@ -2,7 +2,7 @@ namespace NexusUploader;
 
 internal static class InfoPlanner
 {
-    public const string Version = "1.0";
+    public const string Version = "1.1";
 
     public static string Fingerprint(UpdateInfoRequest request) =>
         Json.Hash(new { toolVersion = Version, request });

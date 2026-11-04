@@ -1,6 +1,6 @@
 {
   "requestId": "REPLACE-WITH-NEW-UUID",
   "operation": "update-info",
-  "target": "replace-with-registered-target",
+  "modDirectory": "E:\\Games\\ExampleGame\\ExampleMod",
   "description": "[b]Complete mod page description[/b]"
 }

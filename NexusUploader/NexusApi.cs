@@ -111,12 +111,15 @@ internal sealed class NexusApi : IDisposable
         var modId = Text(data, "id");
         var scopedId = Text(data, "game_scoped_id");
         var gameId = Text(data, "game_id");
+        var pageName = Text(data, "name");
         Guard.Id(modId);
         Guard.Id(scopedId);
         Guard.Id(gameId);
         Guard.Require(scopedId == page.GameScopedId, "MOD_RESOLVE_MISMATCH",
             "Nexus 返回的页面 ID 与 URL 不一致；已停止。");
-        var resolution = new ModResolution(page.GameDomain, scopedId, modId, gameId);
+        Guard.Require(pageName.Length is > 0 and <= 500 && !pageName.Any(char.IsControl),
+            "API_SCHEMA", "Nexus 返回无效页面名称。");
+        var resolution = new ModResolution(page.GameDomain, scopedId, modId, gameId, pageName);
         Guard.PublicText(Json.Serialize(resolution), key);
         return resolution;
     }
@@ -206,9 +209,8 @@ internal sealed class NexusApi : IDisposable
     private static int Integer(JsonElement value, string name)
     {
         var field = Property(value, name);
-        Guard.Require(field.ValueKind == JsonValueKind.Number && field.TryGetInt32(out var result),
-            "API_SCHEMA", "Nexus 响应整数字段类型错误。");
-        return result;
+        if (field.ValueKind == JsonValueKind.Number && field.TryGetInt32(out var result)) return result;
+        throw new SafeException("API_SCHEMA", "Nexus 响应整数字段类型错误。");
     }
 
     public async Task<RemoteFile[]> FilesAsync(string modId, CancellationToken ct)

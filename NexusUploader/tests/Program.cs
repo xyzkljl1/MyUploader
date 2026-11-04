@@ -20,32 +20,33 @@ internal static class Tests
         {
             await Run("strict CLI modes and duplicate flags", () =>
             {
-                Reject(() => App.Parse(["update-file", "--config", "x", "--request", "r", "--plan", "p"]), "CLI_MODE");
-                Reject(() => App.Parse(["update-file", "--config", "x", "--config", "y"]), "CLI_DUPLICATE");
+                Reject(() => App.Parse(["update-file", "--request", "r", "--plan", "p"]), "CLI_MODE");
+                Reject(() => App.Parse(["inspect", "--mod", "1", "--mod", "2"]), "CLI_DUPLICATE");
                 Reject(() => App.Parse(["inspect", "--apikey", Key]), "CLI");
+                Reject(() => App.Parse(["target", "list", "--config", "x"]), "CLI");
                 var inspect = App.Parse(["inspect", "--mod", "12345"]);
                 Check(!inspect.Flags.ContainsKey("--config"));
                 var inspectUrl = App.Parse(["inspect", "--mod", "https://www.nexusmods.com/game/mods/1"]);
                 Check(inspectUrl.Flags.ContainsKey("--mod"));
-                var resolve = App.Parse(["resolve", "--mod-url", "https://www.nexusmods.com/game/mods/1"]);
-                Check(resolve.Command == "resolve");
-                var targetAdd = App.Parse(["target", "add", "--name", "fixture-mod", "--mod", "https://www.nexusmods.com/game/mods/1"]);
+                var targetAdd = App.Parse(["target", "add", "--mod-directory", @"E:\Games\Game\FixtureMod", "--mod", "https://www.nexusmods.com/game/mods/1"]);
                 Check(targetAdd.Command == "target-add");
                 Check(App.Parse(["target", "candidates"]).Command == "target-candidates");
                 Check(App.Parse(["target", "list"]).Command == "target-list");
-                Check(App.Parse(["target", "show", "--name", "fixture-mod"]).Command == "target-show");
-                Check(App.Parse(["inspect", "--target", "fixture-mod"]).Flags["--target"] == "fixture-mod");
+                Check(App.Parse(["inspect", "--mod-directory", @"E:\Games\Game\FixtureMod"]).Flags.ContainsKey("--mod-directory"));
+                Reject(() => App.Parse(["resolve", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
+                Reject(() => App.Parse(["target", "show", "--name", "fixture-mod"]), "CLI");
+                Reject(() => App.Parse(["create-mod", "--dry-run"]), "CLI");
                 Reject(() => App.Parse(["inspect", "--mod-id", "1"]), "CLI");
                 Reject(() => App.Parse(["inspect", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
-                Reject(() => App.Parse(["inspect", "--mod", "1", "--target", "fixture-mod"]), "CLI");
+                Reject(() => App.Parse(["inspect", "--mod", "1", "--mod-directory", @"E:\Games\Game\FixtureMod"]), "CLI");
                 Reject(() => App.Parse(["inspect"]), "CLI");
                 var update = App.Parse(["update-file", "--request", "r", "--dry-run", "--plan", "p"]);
                 Check(!update.Flags.ContainsKey("--config"));
                 var updateInfo = App.Parse(["update-info", "--request", "r", "--dry-run", "--plan", "p"]);
                 Check(updateInfo.Command == "update-info");
                 Check(Path.GetFileName(App.DefaultConfigPath()) == "config.json");
-                Reject(() => Json.Parse<Request>("{\"modId\":\"1\",\"ModId\":\"2\"}"), "DUPLICATE_JSON");
-                try { Json.Parse<Request>("{\"typo\":1}"); throw new Exception(); } catch (JsonException) { }
+                Reject(() => Json.Parse<UpdateFileInput>("{\"modDirectory\":\"x\",\"ModDirectory\":\"y\"}"), "DUPLICATE_JSON");
+                try { Json.Parse<UpdateFileInput>("{\"typo\":1}"); throw new Exception(); } catch (JsonException) { }
                 return Task.CompletedTask;
             });
             await Run("global ID, relative folder and public secret validation", () =>
@@ -53,9 +54,11 @@ internal static class Tests
                 foreach (var value in new[] { "0", "-1", "1/2", "https://www.nexusmods.com/game/mods/1", " 1", "1?x" })
                     Reject(() => Guard.Id(value), "ID");
                 var (request, _) = Setup();
-                var normalized = Guard.Validate(request with { ModDirectory = Path.GetFileName(request.ModDirectory), RequestId = request.RequestId.ToUpperInvariant() }, "update-file", root, Key);
+                var input = new UpdateFileInput { RequestId = request.RequestId.ToUpperInvariant(), Operation = request.Operation,
+                    ModDirectory = Path.GetFileName(request.ModDirectory), Description = request.Description, Changelog = request.Changelog };
+                var normalized = Guard.Validate(input, "update-file", root, Key);
                 Check(normalized.ModDirectory == request.ModDirectory && normalized.RequestId == request.RequestId);
-                Reject(() => Guard.Validate(request with { ModDirectory = Path.Combine(root, "missing") }, "update-file", root, Key), "MOD_DIRECTORY");
+                Reject(() => Guard.Validate(input with { ModDirectory = Path.Combine(root, "missing") }, "update-file", root, Key), "MOD_DIRECTORY");
                 Reject(() => Guard.PublicText(Key, Key), "SECRET_IN_INPUT");
                 Reject(() => NexusApi.StorageUrl("https://localhost/file?signature=secret"), "STORAGE_HOST");
                 Reject(() => NexusApi.StorageUrl("https://bucket.s3.amazonaws.com.evil.test/a"), "STORAGE_HOST");
@@ -96,32 +99,46 @@ internal static class Tests
                     "TARGET_NOT_CANDIDATE");
                 Check(mock.Calls.All(x => x.Method == "GET"));
             });
+            await Run("directory identity uses only the final three segments", () =>
+            {
+                var parent = State();
+                var first = Path.Combine(parent, "old-root", "Game", "Project", "FixtureMod");
+                var second = Path.Combine(parent, "new-root", "Game", "Project", "FixtureMod");
+                Directory.CreateDirectory(first); Directory.CreateDirectory(second);
+                File.WriteAllText(Path.Combine(first, "modinfo.ini"), "name=Fixture Mod\nversion=1.0");
+                File.WriteAllText(Path.Combine(second, "modinfo.ini"), "name=Fixture Mod\nversion=1.0");
+                var firstIdentity = ModDirectoryIdentity.Read(first);
+                var secondIdentity = ModDirectoryIdentity.Read(second);
+                Check(firstIdentity.DirectoryKey == "game/project/fixturemod" &&
+                    firstIdentity.DirectoryKey == secondIdentity.DirectoryKey);
+                return Task.CompletedTask;
+            });
             await Run("central modconfig stores and binds verified publishing targets", async () =>
             {
                 var directory = State();
                 var configPath = Path.Combine(directory, "config.json");
                 var registryPath = ModRegistry.PathForConfig(configPath);
                 Check(registryPath == Path.Combine(directory, "modconfig.json"));
-                var resolution = new ModResolution("skyrimspecialedition", "12604", "12345", "1704");
-                var added = ModRegistry.Add(registryPath, "fixture-mod", resolution);
-                Check(added.ModId == "12345" && File.Exists(registryPath));
-                var stored = ModRegistry.Find(registryPath, "fixture-mod");
-                Check(stored.GameScopedId == "12604" && stored.GameDomain == "skyrimspecialedition");
                 var (baseRequest, mock) = Setup();
-                var raw = baseRequest with { ModId = "", Target = "fixture-mod" };
-                var bound = Guard.Validate(ModRegistry.Bind(raw, registryPath), "update-file", root, Key);
-                Check(bound.Target == "fixture-mod" && bound.ModId == "12345");
-                var info = new UpdateInfoRequest { RequestId = Guid.NewGuid().ToString(), Operation = "update-info",
-                    Target = "fixture-mod", Description = "[b]Page description[/b]" };
-                var boundInfo = Guard.Validate(ModRegistry.Bind(info, registryPath), "update-info", Key);
-                Check(boundInfo.Target == "fixture-mod" && boundInfo.ModId == "12345");
-                Reject(() => ModRegistry.Bind(baseRequest with { Target = "fixture-mod" }, registryPath), "REQUEST_TARGET");
-                Reject(() => ModRegistry.Add(registryPath, "fixture-mod", resolution), "TARGET_EXISTS");
+                var resolution = new ModResolution("skyrimspecialedition", "12604", "12345", "1704", "Fixture Page");
+                var added = ModRegistry.Add(registryPath, baseRequest.ModDirectory, resolution);
+                Check(added.ModId == "12345" && File.Exists(registryPath));
+                var stored = ModRegistry.Find(registryPath, baseRequest.ModDirectory);
+                Check(stored.GameScopedId == "12604" && stored.GameDomain == "skyrimspecialedition");
+                var raw = new UpdateFileInput { RequestId = baseRequest.RequestId, Operation = baseRequest.Operation,
+                    ModDirectory = baseRequest.ModDirectory, Description = baseRequest.Description, Changelog = baseRequest.Changelog };
+                var bound = ModRegistry.Bind(raw, registryPath);
+                Check(bound.DirectoryKey == stored.DirectoryKey && bound.ModId == "12345");
+                var info = new UpdateInfoInput { RequestId = Guid.NewGuid().ToString(), Operation = "update-info",
+                    ModDirectory = baseRequest.ModDirectory, Description = "[b]Page description[/b]" };
+                var boundInfo = ModRegistry.Bind(info, registryPath);
+                Check(boundInfo.DirectoryKey == stored.DirectoryKey && boundInfo.ModId == "12345");
+                Reject(() => ModRegistry.Add(registryPath, baseRequest.ModDirectory, resolution), "TARGET_EXISTS");
                 using var api = new NexusApi(Key, true, mock, new StorageMock());
                 var plan = await Planner.PrepareAsync(bound, api, Key, default);
                 var changed = new ModConfig { Targets = [stored with { ModId = "54321", VerifiedAt = DateTimeOffset.UtcNow }] };
                 File.WriteAllText(registryPath, Json.Serialize(changed));
-                var rebound = Guard.Validate(ModRegistry.Bind(raw, registryPath), "update-file", root, Key);
+                var rebound = ModRegistry.Bind(raw, registryPath);
                 Reject(() => Planner.CheckPlan(plan, rebound, Json.Hash(plan)), "PLAN_MISMATCH");
                 Check(!File.ReadAllText(registryPath).Contains(Key) && !File.ReadAllText(registryPath).Contains("tab=files"));
             });
@@ -224,13 +241,15 @@ internal static class Tests
             await Run("description-only dry-run is read-only and strictly validated", async () =>
             {
                 var (request, mock) = SetupInfo();
-                var normalized = Guard.Validate(request, "update-info", Key);
+                var input = new UpdateInfoInput { RequestId = request.RequestId, Operation = request.Operation,
+                    ModDirectory = request.ModDirectory, Description = request.Description };
+                var normalized = Guard.Validate(input, "update-info", root, Key);
                 Check(normalized.Description == "[b]Full mod page[/b]\nSecond line");
-                Reject(() => Guard.Validate(request with { Description = " " }, "update-info", Key), "DESCRIPTION");
-                try { Json.Parse<UpdateInfoRequest>("{\"summary\":\"not supported\"}"); throw new Exception(); } catch (JsonException) { }
+                Reject(() => Guard.Validate(input with { Description = " " }, "update-info", root, Key), "DESCRIPTION");
+                try { Json.Parse<UpdateInfoInput>("{\"summary\":\"not supported\"}"); throw new Exception(); } catch (JsonException) { }
                 using var api = new NexusApi(Key, true, mock, new StorageMock());
-                var plan = await InfoPlanner.PrepareAsync(normalized, api, default);
-                Check(plan.Request.Description == normalized.Description && plan.Fingerprint == InfoPlanner.Fingerprint(normalized));
+                var plan = await InfoPlanner.PrepareAsync(request, api, default);
+                Check(plan.Request.Description == normalized.Description && plan.Fingerprint == InfoPlanner.Fingerprint(request));
                 Check(mock.Calls.All(c => c.Method == "GET") && !mock.InfoUpdated);
                 await RejectAsync(() => api.UpdateDescriptionAsync(request.ModId, request.Description, default), "DRY_RUN_WRITE");
                 Reject(() => InfoPlanner.CheckPlan(plan, request with { Description = "changed" }, Json.Hash(plan)), "PLAN_MISMATCH");
@@ -494,31 +513,13 @@ internal static class Tests
                 try { using var two = new Journal(state, request with { RequestId = Guid.NewGuid().ToString() }); throw new Exception(); } catch (IOException) { }
                 return Task.CompletedTask;
             });
-            await Run("CLI JSON errors do not expose credential contents", async () =>
+            await Run("credential JSON errors do not expose credential contents", () =>
             {
                 var secretPath = Path.Combine(root, "invalid.secret.json");
                 File.WriteAllText(secretPath, "{\"NEXUSMODS_API_KEY\":\"" + Key);
-                var original = Console.Out; using var output = new StringWriter();
-                try { Console.SetOut(output); var result = await App.Main(["inspect", "--config", secretPath, "--mod", "12345"]); Check(result == 2); }
-                finally { Console.SetOut(original); }
-                Check(!output.ToString().Contains(Key) && output.ToString().Contains("JSON_INVALID"));
-            });
-            await Run("unsupported operations stop before credentials or network", async () =>
-            {
-                foreach (var mode in new[] { "--dry-run", "--execute" })
-                {
-                    var original = Console.Out; using var output = new StringWriter();
-                    try
-                    {
-                        Console.SetOut(output);
-                        var result = await App.Main(["create-mod", "--config", Path.Combine(root, "does-not-exist.secret.json"), mode]);
-                        Check(result == 2);
-                    }
-                    finally { Console.SetOut(original); }
-                    using var response = JsonDocument.Parse(output.ToString());
-                    Check(response.RootElement.GetProperty("code").GetString() == "UNSUPPORTED_OPERATION");
-                    Check(!output.ToString().Contains("does-not-exist"));
-                }
+                try { Credentials.Load(secretPath); throw new Exception(); }
+                catch (JsonException exception) { Check(!exception.ToString().Contains(Key)); }
+                return Task.CompletedTask;
             });
             await Run("removed request fields and browser arguments are rejected", () =>
             {
@@ -528,12 +529,16 @@ internal static class Tests
                 Reject(() => App.Parse(["inspect", "--expected-user-id", "unused"]), "CLI");
                 foreach (var field in new[] { "schemaVersion", "expectedUserId", "expectedModName", "expectedModId", "modUrl", "fileAction", "fileId", "archive", "archiveSha256", "fileName", "version", "sha256" })
                 {
-                    try { Json.Parse<Request>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
+                    try { Json.Parse<UpdateFileInput>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
                 }
-                try { Json.Parse<Request>("{\"changes\":{}}"); throw new Exception(); } catch (JsonException) { }
-                foreach (var field in new[] { "summary", "modDirectory", "changelog", "includeRootDirectory" })
+                foreach (var field in new[] { "target", "modId" })
                 {
-                    try { Json.Parse<UpdateInfoRequest>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
+                    try { Json.Parse<UpdateFileInput>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
+                }
+                try { Json.Parse<UpdateFileInput>("{\"changes\":{}}"); throw new Exception(); } catch (JsonException) { }
+                foreach (var field in new[] { "summary", "changelog", "includeRootDirectory", "target", "modId" })
+                {
+                    try { Json.Parse<UpdateInfoInput>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
                 }
                 return Task.CompletedTask;
             });
@@ -573,12 +578,21 @@ internal static class Tests
         var directory = State();
         File.WriteAllText(Path.Combine(directory, "modinfo.ini"), "name=Test Mod\nversion=2.0\nauthor=Fixture");
         File.WriteAllText(Path.Combine(directory, "mod.lua"), "-- synthetic fixture\nreturn true");
-        var request = new Request { RequestId = Guid.NewGuid().ToString(), Operation = "update-file", ModId = "12345", ModDirectory = directory, Description = "Example description", Changelog = "Example change" };
+        var request = new Request { RequestId = Guid.NewGuid().ToString(), Operation = "update-file", ModId = "12345",
+            DirectoryKey = ModDirectoryIdentity.Read(directory).DirectoryKey, ModDirectory = directory,
+            Description = "Example description", Changelog = "Example change" };
         return (request, new ApiMock());
     }
     private static (UpdateInfoRequest, ApiMock) SetupInfo() =>
-        (new UpdateInfoRequest { RequestId = Guid.NewGuid().ToString(), Operation = "update-info", ModId = "12345",
+        CreateInfo();
+    private static (UpdateInfoRequest, ApiMock) CreateInfo()
+    {
+        var directory = State();
+        File.WriteAllText(Path.Combine(directory, "modinfo.ini"), "name=Test Mod\nversion=2.0");
+        return (new UpdateInfoRequest { RequestId = Guid.NewGuid().ToString(), Operation = "update-info", ModId = "12345",
+            DirectoryKey = ModDirectoryIdentity.Read(directory).DirectoryKey, ModDirectory = directory,
             Description = "[b]Full mod page[/b]\nSecond line" }, new ApiMock());
+    }
     private sealed class ApiMock : HttpMessageHandler
     {
         public List<(string Method, string Path)> Calls { get; } = [];
