@@ -1,6 +1,5 @@
 {
   "requestId": "REPLACE-WITH-NEW-UUID",
-  "operation": "update-info",
   "modDirectory": "E:\\Games\\ExampleGame\\ExampleMod",
   "description": "[b]Complete mod page description[/b]"
 }

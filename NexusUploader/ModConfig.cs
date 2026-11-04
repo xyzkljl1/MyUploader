@@ -11,17 +11,6 @@ internal sealed record ModConfig
 internal sealed record ModTarget(string DirectoryKey, string LocalModName, string? PageName,
     string GameDomain, string GameScopedId, string ModId, string GameId, DateTimeOffset VerifiedAt);
 
-internal sealed record LegacyModConfig
-{
-    public LegacyModTarget[] Targets { get; init; } = [];
-}
-
-internal sealed record LegacyModTarget(string Name, string GameDomain, string GameScopedId,
-    string ModId, string GameId, DateTimeOffset VerifiedAt);
-
-internal sealed record LegacyMigrationReport(int PreviousCount, int MigratedCount, int RemovedCount,
-    string[] DirectoryKeys);
-
 internal static class ModDirectoryIdentity
 {
     public static (string FullPath, string DirectoryKey, string LocalModName) Read(string path)
@@ -78,9 +67,6 @@ internal static class ModDirectoryIdentity
         return (modName!, version!);
     }
 
-    internal static string MatchToken(string value) => new(value.Normalize(NormalizationForm.FormKC)
-        .Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
-
     private static string NormalizeSegment(string value)
     {
         var normalized = value.Normalize(NormalizationForm.FormC).Trim().ToLowerInvariant();
@@ -132,7 +118,7 @@ internal static class ModRegistry
     public static Request Bind(UpdateFileInput request, string path)
     {
         var target = Find(path, request.ModDirectory);
-        return new() { RequestId = request.RequestId, Operation = request.Operation, ModId = target.ModId,
+        return new() { RequestId = request.RequestId, Operation = "update-file", ModId = target.ModId,
             DirectoryKey = target.DirectoryKey, ModDirectory = request.ModDirectory,
             IncludeRootDirectory = request.IncludeRootDirectory, Description = request.Description, Changelog = request.Changelog };
     }
@@ -140,7 +126,7 @@ internal static class ModRegistry
     public static UpdateInfoRequest Bind(UpdateInfoInput request, string path)
     {
         var target = Find(path, request.ModDirectory);
-        return new() { RequestId = request.RequestId, Operation = request.Operation, ModId = target.ModId,
+        return new() { RequestId = request.RequestId, Operation = "update-info", ModId = target.ModId,
             DirectoryKey = target.DirectoryKey, ModDirectory = request.ModDirectory, Description = request.Description };
     }
 
@@ -150,61 +136,6 @@ internal static class ModRegistry
         var target = new ModTarget(identity.DirectoryKey, identity.LocalModName, resolution.PageName,
             resolution.GameDomain, resolution.GameScopedId, resolution.ModId, resolution.GameId, DateTimeOffset.UtcNow);
         return WriteAdded(path, target);
-    }
-
-    internal static async Task<LegacyMigrationReport> MigrateLegacyAsync(string configPath, string searchRoot,
-        CancellationToken ct)
-    {
-        var registryPath = PathForConfig(configPath);
-        using var gate = new FileStream(registryPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        var legacy = Json.Read<LegacyModConfig>(registryPath);
-        Guard.Require(legacy.Targets is not null && legacy.Targets.Length <= 1000,
-            "MODCONFIG_INVALID", "旧 modconfig.json 的 targets 无效或超过 1000 个目标。");
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(searchRoot));
-        Guard.Require(Directory.Exists(root), "MIGRATION_ROOT", "迁移搜索根目录不存在。");
-        var directories = Discover(root, ct);
-        var credentials = Credentials.Load(configPath);
-        using var api = new NexusApi(credentials.ApiKey, readOnly: true);
-        var proposed = new List<ModTarget>();
-        foreach (var old in legacy.Targets)
-        {
-            ct.ThrowIfCancellationRequested();
-            Guard.TargetName(old.Name);
-            var resolution = await api.ResolveAsync(new(old.GameDomain, old.GameScopedId), ct);
-            Guard.Require(resolution.ModId == old.ModId && resolution.GameId == old.GameId,
-                "MOD_RESOLVE_MISMATCH", "旧配置的 Nexus 身份与官方 API 不一致；配置未修改。");
-            var tokens = new[] { old.Name, resolution.PageName }.Select(ModDirectoryIdentity.MatchToken)
-                .Where(x => x.Length > 0).ToHashSet(StringComparer.Ordinal);
-            var matches = directories.Where(x => tokens.Contains(ModDirectoryIdentity.MatchToken(x.LocalModName)) ||
-                tokens.Contains(ModDirectoryIdentity.MatchToken(Path.GetFileName(x.FullPath)))).ToArray();
-            if (matches.Length != 1) continue;
-            var match = matches[0];
-            proposed.Add(new(match.DirectoryKey, match.LocalModName, resolution.PageName, resolution.GameDomain,
-                resolution.GameScopedId, resolution.ModId, resolution.GameId, DateTimeOffset.UtcNow));
-        }
-        var duplicateKeys = proposed.GroupBy(x => x.DirectoryKey, StringComparer.OrdinalIgnoreCase)
-            .Where(x => x.Count() > 1).Select(x => x.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var duplicateIds = proposed.GroupBy(x => x.ModId, StringComparer.Ordinal)
-            .Where(x => x.Count() > 1).Select(x => x.Key).ToHashSet(StringComparer.Ordinal);
-        var migrated = proposed.Where(x => !duplicateKeys.Contains(x.DirectoryKey) && !duplicateIds.Contains(x.ModId))
-            .OrderBy(x => x.DirectoryKey, StringComparer.Ordinal).ToArray();
-        WriteReplacement(registryPath, new ModConfig { Targets = migrated });
-        return new(legacy.Targets.Length, migrated.Length, legacy.Targets.Length - migrated.Length,
-            migrated.Select(x => x.DirectoryKey).ToArray());
-    }
-
-    private static (string FullPath, string DirectoryKey, string LocalModName)[] Discover(string root, CancellationToken ct)
-    {
-        var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true,
-            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System };
-        var found = new List<(string, string, string)>();
-        foreach (var ini in Directory.EnumerateFiles(root, "modinfo.ini", options))
-        {
-            ct.ThrowIfCancellationRequested();
-            try { found.Add(ModDirectoryIdentity.Read(Path.GetDirectoryName(ini)!)); }
-            catch (SafeException) { }
-        }
-        return found.ToArray();
     }
 
     private static ModTarget WriteAdded(string path, ModTarget target)

@@ -20,10 +20,10 @@ internal static class Tests
         {
             await Run("strict CLI modes and duplicate flags", () =>
             {
-                Reject(() => App.Parse(["update-file", "--request", "r", "--plan", "p"]), "CLI_MODE");
+                Reject(() => App.Parse(["update-file", "--request", "r"]), "CLI_MODE");
                 Reject(() => App.Parse(["inspect", "--mod", "1", "--mod", "2"]), "CLI_DUPLICATE");
                 Reject(() => App.Parse(["inspect", "--apikey", Key]), "CLI");
-                Reject(() => App.Parse(["target", "list", "--config", "x"]), "CLI");
+                Reject(() => App.Parse(["inspect", "--mod", "1", "--config", "x"]), "CLI");
                 var inspect = App.Parse(["inspect", "--mod", "12345"]);
                 Check(!inspect.Flags.ContainsKey("--config"));
                 var inspectUrl = App.Parse(["inspect", "--mod", "https://www.nexusmods.com/game/mods/1"]);
@@ -31,7 +31,10 @@ internal static class Tests
                 var targetAdd = App.Parse(["target", "add", "--mod-directory", @"E:\Games\Game\FixtureMod", "--mod", "https://www.nexusmods.com/game/mods/1"]);
                 Check(targetAdd.Command == "target-add");
                 Check(App.Parse(["target", "candidates"]).Command == "target-candidates");
-                Check(App.Parse(["target", "list"]).Command == "target-list");
+                Reject(() => App.Parse(["target", "list"]), "CLI");
+                Reject(() => App.Parse(["target-add", "--mod-directory", @"E:\Games\Game\FixtureMod", "--mod", "1"]), "CLI");
+                Reject(() => App.Parse(["target-candidates"]), "CLI");
+                Reject(() => App.Parse(["target-list"]), "CLI");
                 Check(App.Parse(["inspect", "--mod-directory", @"E:\Games\Game\FixtureMod"]).Flags.ContainsKey("--mod-directory"));
                 Reject(() => App.Parse(["resolve", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
                 Reject(() => App.Parse(["target", "show", "--name", "fixture-mod"]), "CLI");
@@ -40,10 +43,17 @@ internal static class Tests
                 Reject(() => App.Parse(["inspect", "--mod-url", "https://www.nexusmods.com/game/mods/1"]), "CLI");
                 Reject(() => App.Parse(["inspect", "--mod", "1", "--mod-directory", @"E:\Games\Game\FixtureMod"]), "CLI");
                 Reject(() => App.Parse(["inspect"]), "CLI");
-                var update = App.Parse(["update-file", "--request", "r", "--dry-run", "--plan", "p"]);
-                Check(!update.Flags.ContainsKey("--config"));
-                var updateInfo = App.Parse(["update-info", "--request", "r", "--dry-run", "--plan", "p"]);
+                var update = App.Parse(["update-file", "--request", "r", "--dry-run"]);
+                Check(!update.Flags.ContainsKey("--config") && !update.Flags.ContainsKey("--plan"));
+                var updateInfo = App.Parse(["update-info", "--request", "r", "--dry-run"]);
                 Check(updateInfo.Command == "update-info");
+                foreach (var command in new[] { "update-file", "update-info" })
+                {
+                    Reject(() => App.Parse([command, "--request", "r", "--dry-run", "--plan", "p"]), "CLI");
+                    Reject(() => App.Parse([command, "--request", "r", "--execute"]), "CLI_MODE");
+                    Reject(() => App.Parse([command, "--request", "r", "--dry-run", "--confirm", "hash"]), "CLI_MODE");
+                    Check(App.Parse([command, "--request", "r", "--execute", "--confirm", new string('a', 64)]).Flags.ContainsKey("--confirm"));
+                }
                 Check(Path.GetFileName(App.DefaultConfigPath()) == "config.json");
                 Reject(() => Json.Parse<UpdateFileInput>("{\"modDirectory\":\"x\",\"ModDirectory\":\"y\"}"), "DUPLICATE_JSON");
                 try { Json.Parse<UpdateFileInput>("{\"typo\":1}"); throw new Exception(); } catch (JsonException) { }
@@ -54,11 +64,11 @@ internal static class Tests
                 foreach (var value in new[] { "0", "-1", "1/2", "https://www.nexusmods.com/game/mods/1", " 1", "1?x" })
                     Reject(() => Guard.Id(value), "ID");
                 var (request, _) = Setup();
-                var input = new UpdateFileInput { RequestId = request.RequestId.ToUpperInvariant(), Operation = request.Operation,
+                var input = new UpdateFileInput { RequestId = request.RequestId.ToUpperInvariant(),
                     ModDirectory = Path.GetFileName(request.ModDirectory), Description = request.Description, Changelog = request.Changelog };
-                var normalized = Guard.Validate(input, "update-file", root, Key);
+                var normalized = Guard.Validate(input, root, Key);
                 Check(normalized.ModDirectory == request.ModDirectory && normalized.RequestId == request.RequestId);
-                Reject(() => Guard.Validate(input with { ModDirectory = Path.Combine(root, "missing") }, "update-file", root, Key), "MOD_DIRECTORY");
+                Reject(() => Guard.Validate(input with { ModDirectory = Path.Combine(root, "missing") }, root, Key), "MOD_DIRECTORY");
                 Reject(() => Guard.PublicText(Key, Key), "SECRET_IN_INPUT");
                 Reject(() => NexusApi.StorageUrl("https://localhost/file?signature=secret"), "STORAGE_HOST");
                 Reject(() => NexusApi.StorageUrl("https://bucket.s3.amazonaws.com.evil.test/a"), "STORAGE_HOST");
@@ -125,14 +135,14 @@ internal static class Tests
                 Check(added.ModId == "12345" && File.Exists(registryPath));
                 var stored = ModRegistry.Find(registryPath, baseRequest.ModDirectory);
                 Check(stored.GameScopedId == "12604" && stored.GameDomain == "skyrimspecialedition");
-                var raw = new UpdateFileInput { RequestId = baseRequest.RequestId, Operation = baseRequest.Operation,
+                var raw = new UpdateFileInput { RequestId = baseRequest.RequestId,
                     ModDirectory = baseRequest.ModDirectory, Description = baseRequest.Description, Changelog = baseRequest.Changelog };
                 var bound = ModRegistry.Bind(raw, registryPath);
-                Check(bound.DirectoryKey == stored.DirectoryKey && bound.ModId == "12345");
-                var info = new UpdateInfoInput { RequestId = Guid.NewGuid().ToString(), Operation = "update-info",
+                Check(bound.DirectoryKey == stored.DirectoryKey && bound.ModId == "12345" && bound.Operation == "update-file");
+                var info = new UpdateInfoInput { RequestId = Guid.NewGuid().ToString(),
                     ModDirectory = baseRequest.ModDirectory, Description = "[b]Page description[/b]" };
                 var boundInfo = ModRegistry.Bind(info, registryPath);
-                Check(boundInfo.DirectoryKey == stored.DirectoryKey && boundInfo.ModId == "12345");
+                Check(boundInfo.DirectoryKey == stored.DirectoryKey && boundInfo.ModId == "12345" && boundInfo.Operation == "update-info");
                 Reject(() => ModRegistry.Add(registryPath, baseRequest.ModDirectory, resolution), "TARGET_EXISTS");
                 using var api = new NexusApi(Key, true, mock, new StorageMock());
                 var plan = await Planner.PrepareAsync(bound, api, Key, default);
@@ -141,6 +151,27 @@ internal static class Tests
                 var rebound = ModRegistry.Bind(raw, registryPath);
                 Reject(() => Planner.CheckPlan(plan, rebound, Json.Hash(plan)), "PLAN_MISMATCH");
                 Check(!File.ReadAllText(registryPath).Contains(Key) && !File.ReadAllText(registryPath).Contains("tab=files"));
+            });
+            await Run("directory inspection returns only its binding and read-only history", async () =>
+            {
+                var (request, mock) = Setup();
+                var registryPath = Path.Combine(State(), "modconfig.json");
+                var binding = ModRegistry.Add(registryPath, request.ModDirectory,
+                    new("skyrimspecialedition", "12604", "12345", "1704", "Fixture Page"));
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var flags = App.Parse(["inspect", "--mod-directory", request.ModDirectory]).Flags;
+                var result = await App.InspectAsync(flags, registryPath, api, Key, default);
+                Check(result.Status == "inspected" && result.Binding == binding && result.Resolution is null &&
+                    result.Target.ModId == binding.ModId && result.Target.Files.Length == 1);
+                using var doc = JsonDocument.Parse(Json.Serialize(result));
+                Check(doc.RootElement.GetProperty("binding").GetProperty("pageName").GetString() == "Fixture Page");
+                var byId = await App.InspectAsync(App.Parse(["inspect", "--mod", "12345"]).Flags,
+                    registryPath, api, Key, default);
+                Check(byId.Binding is null && byId.Resolution is null && byId.Target.ModId == "12345");
+                var byUrl = await App.InspectAsync(App.Parse(["inspect", "--mod", "https://www.nexusmods.com/skyrimspecialedition/mods/12604"]).Flags,
+                    registryPath, api, Key, default);
+                Check(byUrl.Binding is null && byUrl.Resolution?.PageName == "Fixture Mod" && byUrl.Target.ModId == "12345");
+                Check(mock.Calls.All(x => x.Method == "GET"));
             });
             await Run("sensitive paths are rejected before reading and keys across buffers are rejected", async () =>
             {
@@ -241,11 +272,11 @@ internal static class Tests
             await Run("description-only dry-run is read-only and strictly validated", async () =>
             {
                 var (request, mock) = SetupInfo();
-                var input = new UpdateInfoInput { RequestId = request.RequestId, Operation = request.Operation,
+                var input = new UpdateInfoInput { RequestId = request.RequestId,
                     ModDirectory = request.ModDirectory, Description = request.Description };
-                var normalized = Guard.Validate(input, "update-info", root, Key);
+                var normalized = Guard.Validate(input, root, Key);
                 Check(normalized.Description == "[b]Full mod page[/b]\nSecond line");
-                Reject(() => Guard.Validate(input with { Description = " " }, "update-info", root, Key), "DESCRIPTION");
+                Reject(() => Guard.Validate(input with { Description = " " }, root, Key), "DESCRIPTION");
                 try { Json.Parse<UpdateInfoInput>("{\"summary\":\"not supported\"}"); throw new Exception(); } catch (JsonException) { }
                 using var api = new NexusApi(Key, true, mock, new StorageMock());
                 var plan = await InfoPlanner.PrepareAsync(request, api, default);
@@ -260,14 +291,21 @@ internal static class Tests
                 using var api = new NexusApi(Key, false, mock, new StorageMock());
                 var plan = await InfoPlanner.PrepareAsync(request, api, default);
                 var state = State();
-                var receipt = await InfoPublisher.ExecuteAsync(plan, request, Json.Hash(plan), api, state, default);
+                var confirmation = PlanStore.Save(state, plan);
+                var stored = PlanStore.Read<UpdateInfoPlan>(state, request.RequestId, confirmation);
+                var receipt = await InfoPublisher.ExecuteAsync(stored, request, confirmation, api, state, default);
+                var old = SaveCleanupPlan(state, DateTimeOffset.UtcNow.AddMonths(-2));
+                var completed = App.CompletePublication(receipt, state);
+                Check(completed.Status == "success" && completed.Receipt == receipt &&
+                    completed.Cleanup.DeletedPlans == 1 && !File.Exists(old.Path));
                 Check(receipt.Status == "success" && receipt.Stage == "complete" && receipt.ModId == "12345");
                 Check(mock.InfoUpdated && mock.PageDescription == request.Description && !mock.Published && mock.ChangelogCalls == 0);
                 Check(mock.Calls.Count(c => c.Method == "PATCH") == 1 &&
                     mock.Calls.Single(c => c.Method == "PATCH").Path == "/v3/mods/12345");
                 var calls = mock.Calls.Count;
-                await RejectAsync(() => InfoPublisher.ExecuteAsync(plan, request, Json.Hash(plan), api, state, default), "ALREADY_ATTEMPTED");
+                await RejectAsync(() => InfoPublisher.ExecuteAsync(stored, request, confirmation, api, state, default), "ALREADY_ATTEMPTED");
                 Check(mock.Calls.Count == calls);
+                Check(File.Exists(PlanStore.PathFor(state, request.RequestId, confirmation)));
             });
             await Run("description update failure records uncertain receipt", async () =>
             {
@@ -292,14 +330,147 @@ internal static class Tests
                 using var api = new NexusApi(Key, false, mock, storage);
                 var plan = await Planner.PrepareAsync(request, api, Key, default);
                 var state = State();
-                var receipt = await Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, state, default);
+                var confirmation = PlanStore.Save(state, plan);
+                var stored = PlanStore.Read<Plan>(state, request.RequestId, confirmation);
+                var receipt = await Publisher.ExecuteAsync(stored, request, confirmation, api, Key, state, default);
+                var old = SaveCleanupPlan(state, DateTimeOffset.UtcNow.AddMonths(-2));
+                var damaged = SaveCleanupPlan(state, DateTimeOffset.UtcNow.AddMonths(-2));
+                File.WriteAllText(damaged.Path, "invalid synthetic plan");
+                var completed = App.CompletePublication(receipt, state);
+                Check(completed.Status == "success" && completed.Receipt == receipt &&
+                    completed.Cleanup.DeletedPlans == 1 && completed.Cleanup.WarningCode == "CLEANUP_INCOMPLETE" &&
+                    !File.Exists(old.Path) && File.Exists(damaged.Path));
                 Check(receipt.Status == "success" && receipt.PublishedId == "102");
                 Check(Json.HashBytes(storage.Bytes.ToArray()) == plan.Package.Sha256);
                 Check(mock.UploadFilename == plan.Package.ArchiveName && mock.PublishedVersion == plan.Package.Version && mock.PublishedName == plan.Intent.Name);
                 Check(!storage.SawApiKey && mock.ChangelogCalls == 1);
                 var calls = mock.Calls.Count;
-                await RejectAsync(() => Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, state, default), "ALREADY_ATTEMPTED");
+                await RejectAsync(() => Publisher.ExecuteAsync(stored, request, confirmation, api, Key, state, default), "ALREADY_ATTEMPTED");
                 Check(mock.Calls.Count == calls);
+                Check(File.Exists(PlanStore.PathFor(state, request.RequestId, confirmation)) &&
+                    File.Exists(Path.Combine(state, request.RequestId + ".receipt.json")));
+            });
+            await Run("automatic plan storage selects the exact request and digest without overwrites", async () =>
+            {
+                var (request, mock) = Setup();
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var state = State();
+                var first = await Planner.PrepareAsync(request, api, Key, default);
+                var firstHash = PlanStore.Save(state, first);
+                var secondRequest = request with { Description = "Second review" };
+                var second = await Planner.PrepareAsync(secondRequest, api, Key, default);
+                var secondHash = PlanStore.Save(state, second);
+                Check(firstHash == Json.Hash(first) && secondHash != firstHash);
+                Check(PlanStore.PathFor(state, request.RequestId, firstHash) ==
+                    Path.Combine(state, "plans", request.RequestId, firstHash + ".plan.json"));
+                var selected = PlanStore.Read<Plan>(state, request.RequestId, firstHash);
+                Check(Json.Hash(selected) == firstHash && selected.Request.Description == request.Description);
+                Reject(() => PlanStore.Save(state, first), "PLAN_EXISTS");
+                Reject(() => PlanStore.Read<Plan>(state, Guid.NewGuid().ToString("D"), firstHash), "PLAN_NOT_FOUND");
+                Reject(() => PlanStore.Read<Plan>(state, request.RequestId, new string('0', 64)), "PLAN_NOT_FOUND");
+                Reject(() => Planner.CheckPlan(selected, secondRequest, firstHash), "PLAN_MISMATCH");
+                Check(Directory.GetFiles(Path.Combine(state, "plans", request.RequestId)).Length == 2 &&
+                    mock.Calls.All(x => x.Method == "GET"));
+            });
+            await Run("stored plans reject tampering and path-like confirmation values", async () =>
+            {
+                var (request, mock) = Setup();
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var state = State();
+                var plan = await Planner.PrepareAsync(request, api, Key, default);
+                var hash = PlanStore.Save(state, plan);
+                File.WriteAllText(PlanStore.PathFor(state, request.RequestId, hash),
+                    Json.Serialize(plan with { Request = request with { Description = "Tampered" } }));
+                Reject(() => PlanStore.Read<Plan>(state, request.RequestId, hash), "PLAN_CONFIRMATION");
+                foreach (var value in new[] { "../escape", "", new string('A', 64), new string('a', 63), new string('a', 65) })
+                    Reject(() => PlanStore.Read<Plan>(state, request.RequestId, value), "PLAN_CONFIRMATION");
+                Reject(() => PlanStore.Read<Plan>(state, "../escape", hash), "REQUEST_ID");
+                Check(mock.Calls.All(x => x.Method == "GET"));
+            });
+            await Run("expired plans are refused but retained for audit", async () =>
+            {
+                var (request, mock) = SetupInfo();
+                using var api = new NexusApi(Key, true, mock, new StorageMock());
+                var state = State();
+                var expired = (await InfoPlanner.PrepareAsync(request, api, default)) with
+                { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-20), ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-5) };
+                var hash = PlanStore.Save(state, expired);
+                var stored = PlanStore.Read<UpdateInfoPlan>(state, request.RequestId, hash);
+                Reject(() => InfoPlanner.CheckPlan(stored, request, hash), "PLAN_EXPIRED");
+                Check(File.Exists(PlanStore.PathFor(state, request.RequestId, hash)) &&
+                    !File.Exists(Path.Combine(state, request.RequestId + ".receipt.json")) &&
+                    mock.Calls.All(x => x.Method == "GET"));
+            });
+            await Run("cleanup uses a calendar-month expiry boundary and preserves unresolved receipts", () =>
+            {
+                var state = State();
+                var now = new DateTimeOffset(2026, 11, 4, 12, 0, 0, TimeSpan.Zero);
+                var cutoff = now.AddMonths(-1);
+                var old = SaveCleanupPlan(state, cutoff.AddTicks(-1));
+                var successful = SaveCleanupPlan(state, cutoff.AddDays(-1));
+                var boundary = SaveCleanupPlan(state, cutoff);
+                var recent = SaveCleanupPlan(state, cutoff.AddTicks(1));
+                var valid = SaveCleanupPlan(state, now.AddMinutes(15));
+                var partial = SaveCleanupPlan(state, cutoff.AddDays(-1));
+                var uncertain = SaveCleanupPlan(state, cutoff.AddDays(-1));
+                foreach (var item in new[] { (successful.Plan, "success", "complete"),
+                    (partial.Plan, "partial", "changelog"), (uncertain.Plan, "uncertain", "publish-file") })
+                    File.WriteAllText(Path.Combine(state, item.Plan.Request.RequestId + ".receipt.json"),
+                        Json.Serialize(new Receipt(item.Plan.Request.RequestId, item.Item2, item.Item3, ModId: item.Plan.Request.ModId)));
+                var notes = Path.Combine(Path.GetDirectoryName(boundary.Path)!, "notes.plan.json");
+                File.WriteAllText(notes, "not a tool-generated plan");
+                var config = Path.Combine(state, "config.json");
+                var sentinelLock = Path.Combine(state, "keep.lock");
+                var legacyPlan = Path.Combine(state, "old.plan.json");
+                File.WriteAllText(config, "synthetic configuration must not be opened by cleanup");
+                File.WriteAllText(sentinelLock, "keep"); File.WriteAllText(legacyPlan, "keep");
+                var report = PlanCleanup.Run(state, now);
+                Check(report.DeletedPlans == 2 && report.DeletedDirectories == 2 && report.RetainedPlans == 5 &&
+                    report.FailedItems == 0 && report.WarningCode is null);
+                Check(!File.Exists(old.Path) && !Directory.Exists(Path.GetDirectoryName(old.Path)) &&
+                    !File.Exists(successful.Path) && !Directory.Exists(Path.GetDirectoryName(successful.Path)));
+                Check(new[] { boundary.Path, recent.Path, valid.Path, partial.Path, uncertain.Path, notes, config,
+                    sentinelLock, legacyPlan }.All(File.Exists));
+                foreach (var plan in new[] { successful.Plan, partial.Plan, uncertain.Plan })
+                    Check(File.Exists(Path.Combine(state, plan.Request.RequestId + ".receipt.json")));
+                return Task.CompletedTask;
+            });
+            await Run("cleanup keeps damaged plans and inconsistent or pending receipts", () =>
+            {
+                var state = State(); var now = DateTimeOffset.UtcNow; var expiry = now.AddMonths(-2);
+                var damaged = SaveCleanupPlan(state, expiry);
+                File.WriteAllText(damaged.Path, "{invalid synthetic " + Key);
+                var tampered = SaveCleanupPlan(state, expiry);
+                File.WriteAllText(tampered.Path, Json.Serialize(tampered.Plan with
+                    { Request = tampered.Plan.Request with { Description = "changed" } }));
+                var badReceipt = SaveCleanupPlan(state, expiry);
+                File.WriteAllText(Path.Combine(state, badReceipt.Plan.Request.RequestId + ".receipt.json"), "invalid " + Key);
+                var mismatched = SaveCleanupPlan(state, expiry);
+                File.WriteAllText(Path.Combine(state, mismatched.Plan.Request.RequestId + ".receipt.json"),
+                    Json.Serialize(new Receipt(mismatched.Plan.Request.RequestId, "success", "complete", ModId: "99999")));
+                var pending = SaveCleanupPlan(state, expiry);
+                File.WriteAllText(Path.Combine(state, pending.Plan.Request.RequestId + ".receipt.json.tmp"), "pending");
+                var report = PlanCleanup.Run(state, now);
+                Check(report.DeletedPlans == 0 && report.DeletedDirectories == 0 && report.RetainedPlans == 5 &&
+                    report.FailedItems == 3 && report.WarningCode == "CLEANUP_INCOMPLETE");
+                Check(new[] { damaged.Path, tampered.Path, badReceipt.Path, mismatched.Path, pending.Path }.All(File.Exists));
+                Check(!Json.Serialize(report).Contains(Key));
+                return Task.CompletedTask;
+            });
+            await Run("cleanup respects publishing locks and never changes an unsuccessful result", () =>
+            {
+                var state = State(); var now = DateTimeOffset.UtcNow;
+                var old = SaveCleanupPlan(state, now.AddMonths(-2));
+                using (var journal = new Journal(state, old.Plan.Request))
+                {
+                    var report = PlanCleanup.Run(state, now);
+                    Check(report.DeletedPlans == 0 && report.WarningCode == "CLEANUP_INCOMPLETE" && File.Exists(old.Path));
+                }
+                var receipt = new Receipt(old.Plan.Request.RequestId, "partial", "changelog", ModId: old.Plan.Request.ModId);
+                var completed = App.CompletePublication(receipt, state);
+                Check(completed.Status == "partial" && completed.Receipt == receipt && completed.Cleanup.DeletedPlans == 0 && File.Exists(old.Path));
+                Check(PlanCleanup.Run(state, now).DeletedPlans == 1 && !File.Exists(old.Path));
+                return Task.CompletedTask;
             });
             await Run("flat ZIP option survives dry-run and execute", async () =>
             {
@@ -429,7 +600,7 @@ internal static class Tests
                 var receipt = await Publisher.ExecuteAsync(plan, request, Json.Hash(plan), api, Key, State(), default);
                 Check(receipt.Status == "success" && mock.ChangelogCalls == 0 && mock.PublishedVersion == "3.1-rc2" && mock.Description is null);
             });
-            await Run("directory junctions cannot escape the package root", async () =>
+            await Run("directory junctions cannot escape the package or plan store", async () =>
             {
                 if (!OperatingSystem.IsWindows()) return;
                 var (request, _) = Setup(); var external = State();
@@ -446,6 +617,10 @@ internal static class Tests
                     await process.WaitForExitAsync(timeout.Token); Check(process.ExitCode == 0);
                     await RejectAsync(() => Packaging.BuildAsync(request.ModDirectory, Key, default), "PACKAGE_LINK");
                     await RejectAsync(() => Packaging.BuildAsync(junction, Key, default), "PACKAGE_LINK");
+                    Reject(() => PlanStore.Read<Plan>(junction, request.RequestId, new string('a', 64)), "PLAN_PATH_LINK");
+                    var old = SaveCleanupPlan(external, DateTimeOffset.UtcNow.AddMonths(-2));
+                    var cleanup = PlanCleanup.Run(junction);
+                    Check(cleanup.DeletedPlans == 0 && cleanup.WarningCode == "CLEANUP_INCOMPLETE" && File.Exists(old.Path));
                 }
                 finally
                 {
@@ -531,12 +706,12 @@ internal static class Tests
                 {
                     try { Json.Parse<UpdateFileInput>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
                 }
-                foreach (var field in new[] { "target", "modId" })
+                foreach (var field in new[] { "target", "modId", "operation" })
                 {
                     try { Json.Parse<UpdateFileInput>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
                 }
                 try { Json.Parse<UpdateFileInput>("{\"changes\":{}}"); throw new Exception(); } catch (JsonException) { }
-                foreach (var field in new[] { "summary", "changelog", "includeRootDirectory", "target", "modId" })
+                foreach (var field in new[] { "summary", "changelog", "includeRootDirectory", "target", "modId", "operation" })
                 {
                     try { Json.Parse<UpdateInfoInput>("{\"" + field + "\":\"obsolete\"}"); throw new Exception(); } catch (JsonException) { }
                 }
@@ -573,6 +748,14 @@ internal static class Tests
         try { await action(); throw new Exception(); } catch (SafeException e) { Check(e.Code == code); }
     }
     private static string State() { var path = Path.Combine(root, Guid.NewGuid().ToString()); Directory.CreateDirectory(path); return path; }
+    private static (UpdateInfoPlan Plan, string Path) SaveCleanupPlan(string state, DateTimeOffset expiry)
+    {
+        var (request, _) = SetupInfo();
+        var plan = new UpdateInfoPlan(InfoPlanner.Version, expiry.AddMinutes(-15), expiry,
+            request, InfoPlanner.Fingerprint(request));
+        var hash = PlanStore.Save(state, plan);
+        return (plan, PlanStore.PathFor(state, request.RequestId, hash));
+    }
     private static (Request, ApiMock) Setup()
     {
         var directory = State();

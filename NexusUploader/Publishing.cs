@@ -54,8 +54,7 @@ internal sealed class Journal : IDisposable
     private Journal(string stateDirectory, string requestId, string modId)
     {
         Directory.CreateDirectory(stateDirectory);
-        var targetLock = Json.Hash(new { ModId = modId });
-        gate = new FileStream(Path.Combine(stateDirectory, targetLock + ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        gate = new FileStream(LockPath(stateDirectory, modId), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         path = Path.Combine(stateDirectory, requestId + ".receipt.json");
         Current = new(requestId, "not_started", "validated", ModId: modId);
         try
@@ -64,6 +63,9 @@ internal sealed class Journal : IDisposable
         }
         catch { gate.Dispose(); throw; }
     }
+
+    internal static string LockPath(string stateDirectory, string modId) =>
+        Path.Combine(stateDirectory, Json.Hash(new { ModId = modId }) + ".lock");
 
     public void Set(string status, string stage, string? uploadId = null, string? publishedId = null, string? errorCode = null,
         string? targetFileId = null, string? responseFileId = null)

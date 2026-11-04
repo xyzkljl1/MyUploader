@@ -1,6 +1,5 @@
 {
   "requestId": "REPLACE-WITH-NEW-UUID",
-  "operation": "update-file",
   "modDirectory": "E:\\Games\\ExampleGame\\ExampleMod",
   "includeRootDirectory": true,
   "description": "Release file description.",

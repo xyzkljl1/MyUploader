@@ -4,7 +4,7 @@ namespace NexusUploader;
 
 internal static class Program
 {
-    private static readonly HashSet<string> ValueFlags = new(["--request", "--plan", "--confirm", "--mod", "--mod-directory"]);
+    private static readonly HashSet<string> ValueFlags = new(["--request", "--confirm", "--mod", "--mod-directory"]);
     public static async Task<int> Main(string[] args)
     {
         using var cancellation = new CancellationTokenSource();
@@ -34,15 +34,15 @@ internal static class Program
     {
         Guard.Require(args.Length > 0, "CLI", "缺少命令，请运行 --help。");
         var command = args[0];
+        Guard.Require(command is "target" or "update-file" or "update-info" or "inspect",
+            "CLI", "未知命令，请运行 --help；参数内容不会回显。");
         var firstFlag = 1;
         if (command == "target")
         {
-            Guard.Require(args.Length > 1 && args[1] is "add" or "candidates" or "list", "CLI", "target 必须指定 add、candidates 或 list。");
+            Guard.Require(args.Length > 1 && args[1] is "add" or "candidates", "CLI", "target 必须指定 add 或 candidates。");
             command = "target-" + args[1];
             firstFlag = 2;
         }
-        Guard.Require(command is "update-file" or "update-info" or "inspect" or
-            "target-add" or "target-candidates" or "target-list", "CLI", "未知命令，请运行 --help；参数内容不会回显。");
         var flags = new Dictionary<string, string>();
         for (var i = firstFlag; i < args.Length; i++)
         {
@@ -61,13 +61,13 @@ internal static class Program
         {
             "inspect" => new[] { "--mod", "--mod-directory" },
             "target-add" => new[] { "--mod-directory", "--mod" },
-            "target-candidates" or "target-list" => Array.Empty<string>(),
-            _ => new[] { "--request", "--plan", "--confirm", "--dry-run", "--execute" }
+            "target-candidates" => Array.Empty<string>(),
+            _ => new[] { "--request", "--confirm", "--dry-run", "--execute" }
         };
         Guard.Require(flags.Keys.All(allowed.Contains), "CLI", "命令包含不适用的参数。");
         if (command is "update-file" or "update-info")
         {
-            Required(flags, "--request"); Required(flags, "--plan");
+            Required(flags, "--request");
             Guard.Require(flags.ContainsKey("--dry-run") ^ flags.ContainsKey("--execute"), "CLI_MODE", "必须且只能选择 --dry-run 或 --execute。");
             Guard.Require(flags.ContainsKey("--execute") == flags.ContainsKey("--confirm"), "CLI_MODE", "执行必须提供 --confirm；dry-run 不接受确认参数。");
         }
@@ -111,23 +111,26 @@ internal static class Program
         if (args.Length == 0 || args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
-                NexusUploader 1.4 — automation CLI (.NET 8, JSON stdout)
+                NexusUploader 1.7 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
                 target candidates
                 target add --mod-directory <full local mod directory> --mod <global Nexus v3 ID | Nexus mod page URL>
-                target list
                 inspect (--mod <global Nexus v3 ID | Nexus mod page URL> | --mod-directory <full local mod directory>)
-                update-file --request <JSON> --dry-run --plan <new *.plan.json>
-                update-file --request <same JSON> --execute --plan <plan> --confirm <planSha256>
-                update-info --request <JSON> --dry-run --plan <new *.plan.json>
-                update-info --request <same JSON> --execute --plan <plan> --confirm <planSha256>
+                update-file --request <JSON> --dry-run
+                update-file --request <same JSON> --execute --confirm <planSha256>
+                update-info --request <JSON> --dry-run
+                update-info --request <same JSON> --execute --confirm <planSha256>
 
-                update-file request: requestId, operation, modDirectory; optional includeRootDirectory (default true), description/changelog.
-                update-info request: requestId, operation, modDirectory, description (full mod page BBCode).
+                update-file request: requestId, modDirectory; optional includeRootDirectory (default true), description/changelog.
+                update-info request: requestId, modDirectory, description (full mod page BBCode).
+                inspect --mod-directory returns the registered binding plus remote file/version history.
                 Package: reads modinfo.ini name/version, creates ZIP, computes hash automatically.
                 Main Files: none -> create; one -> update; multiple -> error.
                 Dry-run: read-only remote checks and local plan creation; update-file also builds a temporary package.
+                Plans: stored automatically in .nexus-state/plans/<requestId>/<planSha256>.plan.json; no --plan option.
+                Cleanup: successful execute removes verified plans expired over one calendar month ago, except unresolved attempts.
+                Cleanup failures are warnings only; receipts, lock files and configs are retained. Dry-run never cleans up.
                 Execute: plan expires after 15 minutes; update-file repackages and rechecks content and remote state.
                 Only reliable APIs/tools are allowed. No browser/computer-use implementation or fallback.
                 No interactive prompts, auto-login, API key CLI args, --yes, --force, or automatic retries.
@@ -138,11 +141,6 @@ internal static class Program
         var (command, flags) = Parse(args);
         var configPath = DefaultConfigPath();
         var modConfigPath = ModRegistry.PathForConfig(configPath);
-        if (command == "target-list")
-        {
-            Console.WriteLine(Json.Serialize(new { status = "listed", targets = ModRegistry.Load(modConfigPath, allowMissing: true).Targets }));
-            return 0;
-        }
         var credentials = Credentials.Load(configPath);
         if (command == "target-candidates")
         {
@@ -175,75 +173,89 @@ internal static class Program
         if (command == "inspect")
         {
             using var api = new NexusApi(credentials.ApiKey, readOnly: true);
-            ModResolution? resolution = null;
-            string? modId = null;
-            if (flags.TryGetValue("--mod-directory", out var modDirectory))
-            {
-                modId = ModRegistry.Find(modConfigPath, modDirectory).ModId;
-            }
-            else
-            {
-                var mod = flags["--mod"];
-                Guard.PublicText(mod, credentials.ApiKey);
-                if (IsNumeric(mod))
-                {
-                    Guard.Id(mod);
-                    modId = mod;
-                }
-                else
-                {
-                    resolution = await api.ResolveAsync(Guard.ModUrl(mod), ct);
-                    modId = resolution.ModId;
-                }
-            }
-            var target = await api.InspectAsync(modId, ct);
-            Console.WriteLine(Json.Serialize(new { status = "inspected", resolution, target }));
+            var result = await InspectAsync(flags, modConfigPath, api, credentials.ApiKey, ct);
+            Console.WriteLine(Json.Serialize(result));
             return 0;
         }
         var requestPath = Path.GetFullPath(flags["--request"]);
-        var planPath = Path.GetFullPath(flags["--plan"]);
-        Guard.Require(planPath.EndsWith(".plan.json", StringComparison.OrdinalIgnoreCase), "PLAN_PATH", "计划文件必须使用 .plan.json 扩展名。");
+        var stateDirectory = StateDirectory();
         var dryRun = flags.ContainsKey("--dry-run");
-        if (dryRun) Guard.Require(!File.Exists(planPath), "PLAN_EXISTS", "计划已存在；使用新的计划路径以保留审查记录。");
         using var client = new NexusApi(credentials.ApiKey, readOnly: dryRun);
         if (command == "update-info")
         {
-            var input = Guard.Validate(Json.Read<UpdateInfoInput>(requestPath), command,
+            var input = Guard.Validate(Json.Read<UpdateInfoInput>(requestPath),
                 Path.GetDirectoryName(requestPath)!, credentials.ApiKey);
             var request = ModRegistry.Bind(input, modConfigPath);
             if (dryRun)
             {
                 var plan = await InfoPlanner.PrepareAsync(request, client, ct);
-                Json.WriteNew(planPath, plan);
-                Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256 = Json.Hash(plan), plan }));
+                var planSha256 = PlanStore.Save(stateDirectory, plan);
+                Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256, plan }));
             }
             else
             {
-                var receipt = await InfoPublisher.ExecuteAsync(Json.Read<UpdateInfoPlan>(planPath), request,
-                    flags["--confirm"], client, StateDirectory(), ct);
-                Console.WriteLine(Json.Serialize(new { status = receipt.Status, receipt }));
+                var plan = PlanStore.Read<UpdateInfoPlan>(stateDirectory, request.RequestId, flags["--confirm"]);
+                var receipt = await InfoPublisher.ExecuteAsync(plan, request,
+                    flags["--confirm"], client, stateDirectory, ct);
+                Console.WriteLine(Json.Serialize(CompletePublication(receipt, stateDirectory)));
             }
         }
         else
         {
-            var input = Guard.Validate(Json.Read<UpdateFileInput>(requestPath), command,
+            var input = Guard.Validate(Json.Read<UpdateFileInput>(requestPath),
                 Path.GetDirectoryName(requestPath)!, credentials.ApiKey);
             var request = ModRegistry.Bind(input, modConfigPath);
             if (dryRun)
             {
                 var plan = await Planner.PrepareAsync(request, client, credentials.ApiKey, ct);
-                Json.WriteNew(planPath, plan);
-                Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256 = Json.Hash(plan), plan }));
+                var planSha256 = PlanStore.Save(stateDirectory, plan);
+                Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256, plan }));
             }
             else
             {
-                var receipt = await Publisher.ExecuteAsync(Json.Read<Plan>(planPath), request, flags["--confirm"], client,
-                    credentials.ApiKey, StateDirectory(), ct);
-                Console.WriteLine(Json.Serialize(new { status = receipt.Status, receipt }));
+                var plan = PlanStore.Read<Plan>(stateDirectory, request.RequestId, flags["--confirm"]);
+                var receipt = await Publisher.ExecuteAsync(plan, request, flags["--confirm"], client,
+                    credentials.ApiKey, stateDirectory, ct);
+                Console.WriteLine(Json.Serialize(CompletePublication(receipt, stateDirectory)));
             }
         }
         return 0;
     }
+
+    internal static async Task<InspectionResult> InspectAsync(Dictionary<string, string> flags, string modConfigPath,
+        NexusApi api, string key, CancellationToken ct)
+    {
+        ModResolution? resolution = null;
+        ModTarget? binding = null;
+        string modId;
+        if (flags.TryGetValue("--mod-directory", out var modDirectory))
+        {
+            binding = ModRegistry.Find(modConfigPath, modDirectory);
+            modId = binding.ModId;
+        }
+        else
+        {
+            var mod = flags["--mod"];
+            Guard.PublicText(mod, key);
+            if (IsNumeric(mod))
+            {
+                Guard.Id(mod);
+                modId = mod;
+            }
+            else
+            {
+                resolution = await api.ResolveAsync(Guard.ModUrl(mod), ct);
+                modId = resolution.ModId;
+            }
+        }
+        var target = await api.InspectAsync(modId, ct);
+        var result = new InspectionResult("inspected", resolution, binding, target);
+        Guard.PublicText(Json.Serialize(result), key);
+        return result;
+    }
+
+    internal static PublicationResult CompletePublication(Receipt receipt, string stateDirectory) =>
+        new(receipt.Status, receipt, receipt.Status == "success" ? PlanCleanup.Run(stateDirectory) : new());
 
     private static bool IsNumeric(string value) => value.Length > 0 && value.All(c => c is >= '0' and <= '9');
 }

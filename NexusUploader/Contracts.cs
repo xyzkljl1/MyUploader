@@ -16,7 +16,6 @@ internal sealed class SafeException(string code, string message, int exitCode = 
 internal sealed record UpdateFileInput
 {
     public string RequestId { get; init; } = "";
-    public string Operation { get; init; } = "";
     public string ModDirectory { get; init; } = "";
     public bool IncludeRootDirectory { get; init; } = true;
     public string? Description { get; init; }
@@ -26,7 +25,6 @@ internal sealed record UpdateFileInput
 internal sealed record UpdateInfoInput
 {
     public string RequestId { get; init; } = "";
-    public string Operation { get; init; } = "";
     public string ModDirectory { get; init; } = "";
     public string Description { get; init; } = "";
 }
@@ -58,6 +56,7 @@ internal sealed record RemoteFile(string Id, string Name, bool IsActive, FileVer
 internal sealed record Target(string ModId, RemoteFile[] Files);
 internal sealed record ModPageReference(string GameDomain, string GameScopedId);
 internal sealed record ModResolution(string GameDomain, string GameScopedId, string ModId, string GameId, string PageName);
+internal sealed record InspectionResult(string Status, ModResolution? Resolution, ModTarget? Binding, Target Target);
 internal sealed record ModCandidate(string ModId, string GameDomain, string GameName, string GameScopedId,
     string GameId, string Name, string Status, string Affiliation, int FileCount)
 {
@@ -75,6 +74,9 @@ internal sealed record VerifiedPublish(string VersionId, string FileId);
 internal sealed record Receipt(string RequestId, string Status, string Stage, string? UploadId = null,
     string? PublishedId = null, string? ErrorCode = null, string? ModId = null, string? TargetFileId = null,
     string? ResponseFileId = null);
+internal sealed record CleanupReport(int DeletedPlans = 0, int DeletedDirectories = 0,
+    int RetainedPlans = 0, int FailedItems = 0, string? WarningCode = null);
+internal sealed record PublicationResult(string Status, Receipt Receipt, CleanupReport Cleanup);
 
 internal static class Json
 {
@@ -125,13 +127,6 @@ internal static class Json
     public static string Hash<T>(T value) => HashBytes(Encoding.UTF8.GetBytes(Serialize(value)));
     public static string HashBytes(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
-    public static void WriteNew<T>(string path, T value)
-    {
-        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        var bytes = Encoding.UTF8.GetBytes(Serialize(value));
-        stream.Write(bytes);
-        stream.Flush(true);
-    }
 }
 
 internal static class Guard
@@ -142,8 +137,6 @@ internal static class Guard
     }
 
     public static void Id(string? value) => Require(value is not null && Regex.IsMatch(value, @"\A[1-9][0-9]{0,24}\z"), "ID", "ID 必须是正整数字符串，不可使用占位符或从页面 ID 猜测全局 ID。");
-    public static void TargetName(string? value) => Require(value is not null && Regex.IsMatch(value, @"\A[a-z0-9][a-z0-9._-]{0,63}\z", RegexOptions.CultureInvariant),
-        "TARGET_NAME", "target 名称必须为 1–64 个小写 ASCII 字母、数字、点、下划线或连字符，且以字母或数字开头。");
     public static ModPageReference ModUrl(string? value)
     {
         Uri? url = null;
@@ -177,9 +170,8 @@ internal static class Guard
             "SECRET_IN_INPUT", "公开内容包含凭据或签名 URL 特征；拒绝输出和上传。");
     }
 
-    public static UpdateFileInput Validate(UpdateFileInput request, string operation, string baseDirectory, string apiKey)
+    public static UpdateFileInput Validate(UpdateFileInput request, string baseDirectory, string apiKey)
     {
-        Require(request.Operation == operation && operation == "update-file", "OPERATION", "operation 必须为受支持的 update-file 命令。");
         Require(Guid.TryParseExact(request.RequestId, "D", out var requestId) && requestId != Guid.Empty,
             "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
         PublicText(Json.Serialize(request), apiKey);
@@ -193,10 +185,8 @@ internal static class Guard
         return normalized;
     }
 
-    public static UpdateInfoInput Validate(UpdateInfoInput request, string operation, string baseDirectory, string apiKey)
+    public static UpdateInfoInput Validate(UpdateInfoInput request, string baseDirectory, string apiKey)
     {
-        Require(request.Operation == operation && operation == "update-info", "OPERATION",
-            "operation 必须为受支持的 update-info 命令。");
         Require(Guid.TryParseExact(request.RequestId, "D", out var requestId) && requestId != Guid.Empty,
             "REQUEST_ID", "requestId 必须是非空 UUID；重试同一操作必须保留此 ID。");
         PublicText(Json.Serialize(request), apiKey);
