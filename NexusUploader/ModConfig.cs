@@ -88,7 +88,7 @@ internal static class ModRegistry
     {
         if (!File.Exists(path))
         {
-            Guard.Require(allowMissing, "MODCONFIG_MISSING", "modconfig.json 不存在；请先用 target add 登记发布目标。");
+            Guard.Require(allowMissing, "MODCONFIG_MISSING", "modconfig.json 不存在；请运行 target candidates，并在首次 update-file --dry-run 时传入 --mod。");
             return new();
         }
         var config = Json.Read<ModConfig>(path);
@@ -109,7 +109,7 @@ internal static class ModRegistry
     {
         var identity = ModDirectoryIdentity.Read(modDirectory);
         var matches = Load(path).Targets.Where(t => t.DirectoryKey.Equals(identity.DirectoryKey, StringComparison.OrdinalIgnoreCase)).ToArray();
-        Guard.Require(matches.Length == 1, "TARGET_NOT_FOUND", "modconfig.json 中没有该 modDirectory 的绑定；请先运行 target candidates 和 target add。");
+        Guard.Require(matches.Length == 1, "TARGET_NOT_FOUND", "modconfig.json 中没有该 modDirectory 的绑定；请运行 target candidates，并在首次 update-file --dry-run 时传入 --mod。");
         Guard.Require(matches[0].LocalModName.Equals(identity.LocalModName, StringComparison.OrdinalIgnoreCase),
             "TARGET_LOCAL_NAME_CHANGED", "modinfo.ini 名称与已登记绑定不一致；禁止猜测目标。");
         return matches[0];
@@ -118,6 +118,11 @@ internal static class ModRegistry
     public static Request Bind(UpdateFileInput request, string path)
     {
         var target = Find(path, request.ModDirectory);
+        return Bind(request, target);
+    }
+
+    internal static Request Bind(UpdateFileInput request, ModTarget target)
+    {
         return new() { RequestId = request.RequestId, Operation = "update-file", ModId = target.ModId,
             DirectoryKey = target.DirectoryKey, ModDirectory = request.ModDirectory,
             IncludeRootDirectory = request.IncludeRootDirectory, Description = request.Description, Changelog = request.Changelog };
@@ -138,15 +143,37 @@ internal static class ModRegistry
         return WriteAdded(path, target);
     }
 
+    internal static ModConfig RequireAvailable(string path, string directoryKey, string? modId = null)
+    {
+        var config = Load(path, allowMissing: true);
+        Guard.Require(!config.Targets.Any(t => t.DirectoryKey.Equals(directoryKey, StringComparison.OrdinalIgnoreCase)),
+            "TARGET_EXISTS", "该 modDirectory 已登记；禁止传入 --mod 或覆盖绑定，请重新 dry-run。");
+        if (modId is not null)
+            Guard.Require(!config.Targets.Any(t => t.ModId == modId), "TARGET_EXISTS", "该全局 modId 已登记；禁止重复绑定。");
+        return config;
+    }
+
+    internal static void CheckLocalTarget(string modDirectory, ModTarget target)
+    {
+        Validate(target);
+        var identity = ModDirectoryIdentity.Read(modDirectory);
+        Guard.Require(identity.DirectoryKey == target.DirectoryKey && identity.LocalModName == target.LocalModName,
+            "BINDING_CHANGED", "本地目录或 modinfo.ini 名称与首次绑定计划不一致；请重新 dry-run。");
+    }
+
+    internal static ModTarget ConfirmRegistration(string path, string modDirectory, ModTarget target)
+    {
+        CheckLocalTarget(modDirectory, target);
+        return WriteAdded(path, target with { VerifiedAt = DateTimeOffset.UtcNow });
+    }
+
     private static ModTarget WriteAdded(string path, ModTarget target)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
         Guard.Require(Directory.Exists(directory), "MODCONFIG_PATH", "modconfig.json 所在目录不存在。");
         using var gate = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        var config = Load(path, allowMissing: true);
-        Guard.Require(!config.Targets.Any(t => t.DirectoryKey.Equals(target.DirectoryKey, StringComparison.OrdinalIgnoreCase)),
-            "TARGET_EXISTS", "该 modDirectory 已登记；禁止自动覆盖。");
-        Guard.Require(!config.Targets.Any(t => t.ModId == target.ModId), "TARGET_EXISTS", "该全局 modId 已登记；禁止重复绑定。");
+        var config = RequireAvailable(path, target.DirectoryKey, target.ModId);
+        Guard.Require(config.Targets.Length < 1000, "MODCONFIG_LIMIT", "modconfig.json 已达到 1000 个绑定的上限。");
         WriteReplacement(path, config with { Targets = config.Targets.Append(target).OrderBy(t => t.DirectoryKey, StringComparer.Ordinal).ToArray() });
         return target;
     }

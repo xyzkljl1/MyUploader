@@ -4,8 +4,9 @@ namespace NexusUploader;
 
 internal static class Planner
 {
-    public const string Version = "1.2";
-    public static string Fingerprint(Request request, Target target, PackageInfo package, FileIntent intent) => Json.Hash(new { toolVersion = Version, request, target, package, intent });
+    public const string Version = "1.3";
+    public static string Fingerprint(Request request, Target target, PackageInfo package, FileIntent intent,
+        BindingProposal? registration = null) => Json.Hash(new { toolVersion = Version, request, target, package, intent, registration });
 
     public static FileIntent Resolve(Request request, Target target, PackageInfo package)
     {
@@ -19,21 +20,23 @@ internal static class Planner
         return new("update", main[0].Id, main[0].Name, "main");
     }
 
-    public static async Task<Plan> PrepareAsync(Request request, NexusApi api, string key, CancellationToken ct)
+    public static async Task<Plan> PrepareAsync(Request request, NexusApi api, string key, CancellationToken ct,
+        BindingProposal? registration = null)
     {
         using var package = await Packaging.BuildAsync(request.ModDirectory, key, request.IncludeRootDirectory, ct);
         var target = await api.InspectAsync(request.ModId, ct);
         var intent = Resolve(request, target, package.Info);
         Guard.PublicText(Json.Serialize(new { target, package = package.Info, intent }), key);
         var now = DateTimeOffset.UtcNow;
-        return new(Version, now, now.AddMinutes(15), request, target, package.Info, intent, Fingerprint(request, target, package.Info, intent));
+        return new(Version, now, now.AddMinutes(15), request, target, package.Info, intent,
+            Fingerprint(request, target, package.Info, intent, registration), registration);
     }
 
     public static void CheckPlan(Plan plan, Request request, string confirmation)
     {
         Guard.Require(plan.ToolVersion == Version && Json.Hash(request) == Json.Hash(plan.Request), "PLAN_MISMATCH", "工具版本或请求已变化，必须重新 dry-run。");
         Guard.Require(plan.CreatedAt <= DateTimeOffset.UtcNow && plan.ExpiresAt > DateTimeOffset.UtcNow && plan.ExpiresAt - plan.CreatedAt == TimeSpan.FromMinutes(15), "PLAN_EXPIRED", "计划已过期或时间无效，必须重新 dry-run。");
-        Guard.Require(plan.Fingerprint == Fingerprint(request, plan.Target, plan.Package, plan.Intent) && confirmation == Json.Hash(plan), "PLAN_CONFIRMATION", "计划被更改或 --confirm 不匹配；必须确认 dry-run 返回的完整 planSha256。");
+        Guard.Require(plan.Fingerprint == Fingerprint(request, plan.Target, plan.Package, plan.Intent, plan.Registration) && confirmation == Json.Hash(plan), "PLAN_CONFIRMATION", "计划被更改或 --confirm 不匹配；必须确认 dry-run 返回的完整 planSha256。");
     }
 }
 
@@ -59,13 +62,17 @@ internal sealed class Journal : IDisposable
         Current = new(requestId, "not_started", "validated", ModId: modId);
         try
         {
-            Guard.Require(!File.Exists(path), "ALREADY_ATTEMPTED", "此 requestId 已尝试执行。请检查回执及 Nexus，禁止自动重试或换 ID 绕过。");
+            RequireUnattempted(stateDirectory, requestId);
         }
         catch { gate.Dispose(); throw; }
     }
 
     internal static string LockPath(string stateDirectory, string modId) =>
         Path.Combine(stateDirectory, Json.Hash(new { ModId = modId }) + ".lock");
+
+    internal static void RequireUnattempted(string stateDirectory, string requestId) =>
+        Guard.Require(!File.Exists(Path.Combine(stateDirectory, requestId + ".receipt.json")),
+            "ALREADY_ATTEMPTED", "此 requestId 已尝试执行。请检查回执及 Nexus，禁止自动重试或换 ID 绕过。");
 
     public void Set(string status, string stage, string? uploadId = null, string? publishedId = null, string? errorCode = null,
         string? targetFileId = null, string? responseFileId = null)
@@ -86,7 +93,8 @@ internal sealed class Journal : IDisposable
 
 internal static class Publisher
 {
-    public static async Task<Receipt> ExecuteAsync(Plan plan, Request request, string confirm, NexusApi api, string key, string stateDirectory, CancellationToken ct)
+    public static async Task<Receipt> ExecuteAsync(Plan plan, Request request, string confirm, NexusApi api, string key,
+        string stateDirectory, CancellationToken ct, string? registryPath = null)
     {
         Planner.CheckPlan(plan, request, confirm);
         using var journal = new Journal(stateDirectory, request);
@@ -94,7 +102,14 @@ internal static class Publisher
         Guard.Require(Json.Hash(package.Info) == Json.Hash(plan.Package), "PACKAGE_CHANGED", "文件夹内容或 modinfo.ini 已变化，必须重新 dry-run。");
         var target = await api.InspectAsync(request.ModId, ct);
         var intent = Planner.Resolve(request, target, package.Info);
-        Guard.Require(Planner.Fingerprint(request, target, package.Info, intent) == plan.Fingerprint, "REMOTE_CHANGED", "Nexus 文件状态已变化，必须重新 dry-run；不会静默切换创建/更新动作。");
+        Guard.Require(Planner.Fingerprint(request, target, package.Info, intent, plan.Registration) == plan.Fingerprint, "REMOTE_CHANGED", "Nexus 文件状态已变化，必须重新 dry-run；不会静默切换创建/更新动作。");
+        if (plan.Registration is not null)
+        {
+            Guard.Require(registryPath is not null, "BINDING_PROPOSAL", "执行首次绑定计划时缺少工具内部的绑定存储位置。");
+            Guard.Require(plan.Registration.Target.ModId == request.ModId &&
+                plan.Registration.Target.DirectoryKey == request.DirectoryKey, "BINDING_PROPOSAL", "首次绑定计划与发布目标不一致。");
+            await FileWorkflow.ConfirmBindingAsync(plan.Registration, request.ModDirectory, registryPath, api, key, ct);
+        }
         ct.ThrowIfCancellationRequested();
         journal.Set("uncertain", "create-upload", targetFileId: intent.FileId); // Persist before the first side effect, including timeouts/cancellation.
         try

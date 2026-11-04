@@ -6,9 +6,9 @@
 
 | 命令 | 功能 |
 | --- | --- |
-| `target candidates/add` | 获取可登记候选，并在 uploader 的 `modconfig.json` 中登记“本地 mod 目录 → Nexus 页面”绑定 |
+| `target candidates` | 获取可用于首次上传的未登记候选页面，供调用 Agent 选择 |
 | `inspect` | 按完整本地 mod 目录查询当前绑定及远端文件历史，或通过 `--mod` 按全局 `modId` / 官方页面 URL 查询远端文件历史，只发送 GET |
-| `update-file` | 打包文件夹、分片上传、自动创建/更新 Main File、同步页面版本，可追加 changelog |
+| `update-file` | 首次确认时登记目录绑定；打包文件夹、分片上传、自动创建/更新 Main File、同步页面版本，可追加 changelog |
 | `update-info` | 只替换已有 mod 页面的完整 BBCode 正文，不打包或上传文件，不改标题、摘要、版本及 changelog |
 
 文件链路参考用户指定的 Updater、[Nexus 官方 OpenAPI](https://github.com/Nexus-Mods/Vortex/blob/master/packages/nexus-api-v3/schema/openapi.yaml) 和 [Nexus 官方上传 Action](https://github.com/Nexus-Mods/upload-action)。`update-info` 使用 OpenAPI 中的官方 `editMod` 接口；该接口目前标记为 Experimental，工具严格限定为已有页面的 `description` 字段。官方可靠接口仍不支持创建 mod 页面。创建 Main File 和修改正文的前提都是 mod 页面已经存在。
@@ -48,7 +48,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | `description` | 否 | 此次上传的**文件版本说明**，不修改 mod 页面正文；不从 INI 的 description 自动继承。省略或 null 时不发送此字段；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 | `changelog` | 否 | 文件发布并核验成功后，为 INI 版本号追加的 mod 更新日志；不会替换旧日志。省略或 null 时跳过此调用；显式提供时须非空、无首尾空白，最多 50,000 字符 |
 
-`update-file` 请求 JSON 不接受 `operation`、`target`、`modId`、用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；操作由调用命令决定。页面 URL 只用于统一接受 ID/URL 的 `target add`、`inspect --mod` 命令。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行额外账号身份比对。
+`update-file` 请求 JSON 不接受 `operation`、`target`、`modId`、用户 ID、预期 mod 名称、页面 URL、动作选择、fileId、压缩包路径、fileName、version 或包摘要参数；操作由调用命令决定。ID/页面 URL 仅用于首次 `update-file --dry-run --mod` 或 `inspect --mod`。请求和输出没有 `schemaVersion`；旧请求不会兼容，未知/重复字段会报错。认证直接使用所提供的 API key，不进行额外账号身份比对。
 
 ### 单独修改页面正文
 
@@ -68,7 +68,7 @@ pwsh -NoProfile -File .\NexusUploader\nexus.ps1 --help
 | `modDirectory` | 是 | 已登记绑定的完整本地 mod 文件夹；工具内部解析为固定全局 `modId`。即使只改页面正文，也必须提供它以避免修改错误页面 |
 | `description` | 是 | 将要替换页面现有正文的完整 BBCode，须非空、无首尾空白和非法控制字符，最多 1,000,000 字符 |
 
-`update-info` 不接受 `operation`、`target`、`modId`、`summary`、标题、版本、文件说明或 changelog 字段；操作由调用命令决定。`description` 是完整页面正文，不是增量片段；成功后旧正文会被整体替换。工具无法通过当前接口读回页面正文，因此 dry-run 会显示并固化待提交的完整文本，调用任务必须在确认摘要前审核它。
+`update-info` 使用已经登记的目录绑定，不接受 `--mod`，也不接受 `operation`、`target`、`modId`、`summary`、标题、版本、文件说明或 changelog 字段；操作由调用命令决定。`description` 是完整页面正文，不是增量片段；成功后旧正文会被整体替换。工具无法通过当前接口读回页面正文，因此 dry-run 会显示并固化待提交的完整文本，调用任务必须在确认摘要前审核它。
 
 ## 文件夹与 modinfo.ini
 
@@ -113,12 +113,22 @@ Main File 按**文件组**计数：`is_active=true` 且至少一个版本的 `ca
 $tool = 'E:\MyWebsiteHelper\MyUploader\NexusUploader\nexus.ps1'
 
 pwsh -NoProfile -File $tool target candidates
-pwsh -NoProfile -File $tool target add --mod-directory 'E:\Games\ExampleGame\ExampleMod' --mod '<global-mod-id-or-official-page-url>'
+
+# 首次上传：在 dry-run 中指定已选定的候选 ID 或官方页面 URL
+pwsh -NoProfile -File $tool update-file `
+  --request 'E:\MyRelease\release.json' `
+  --dry-run --mod '<global-mod-id-or-official-page-url>'
+
+# 审查计划后确认：此时不再传 --mod，工具保存绑定并上传
+pwsh -NoProfile -File $tool update-file `
+  --request 'E:\MyRelease\release.json' `
+  --confirm '<planSha256>'
 
 pwsh -NoProfile -File $tool inspect --mod '<global-mod-id-or-official-page-url>'
 
 pwsh -NoProfile -File $tool inspect --mod-directory 'E:\Games\ExampleGame\ExampleMod'
 
+# 后续更新：先准备新版本和新的 requestId，再使用不带 --mod 的 dry-run
 pwsh -NoProfile -File $tool update-file `
   --request 'E:\MyRelease\release.json' `
   --dry-run
@@ -130,15 +140,19 @@ pwsh -NoProfile -File $tool update-info `
 
 `target candidates` 使用官方 v3 `team-mods` 接口分页读取当前 API key 用户拥有或作为团队成员参与的页面。它排除已经登记的 ID、公开/审核中/已删除页面，以及任何已有文件组的页面，只返回状态为 `not_published` 或 `hidden` 且文件组为零的候选。输出包含全局 ID、游戏域名及名称、页面 ID、页面名称、状态、团队关系和文件组数量；只发送 GET，不写配置，不做字符串或 AI 猜测。接口响应缺页、列表并发变化、未知状态或超过 10,000 个团队 mod 时安全停止。
 
-`target add --mod-directory <full-path> --mod <value>` 的 `--mod` 严格接受两种格式：纯数字始终表示全局 v3 `modId`；官方 HTTPS mod 页面 URL 则通过 `getMod` 解析。URL 必须为 `https://nexusmods.com/<game-domain>/mods/<page-id>` 或带 `www` 的同一格式，可带普通查询参数和片段；拒绝其他主机、HTTP、用户信息、自定义端口和编码路径。数字 ID 必须来自当前 `target candidates` 候选，登记前会重新查询并确认它仍然未登记、非公开且没有文件组；URL 保留为候选接口不可用或人工明确页面时的后备方式。工具校验 API 返回的页面 ID 与 URL 一致，不会把 URL 内的游戏页面 ID 当成全局 ID。验证成功后以本地互斥锁和原子替换写入 `modconfig.json`；目录键或全局 ID 已存在时拒绝覆盖。
+`update-file --request <JSON> --dry-run --mod <value>` 把首次绑定并入上传。`--mod` 严格接受两种格式：纯数字始终表示全局 v3 `modId`；官方 HTTPS mod 页面 URL 则通过 `getMod` 解析。URL 必须为 `https://nexusmods.com/<game-domain>/mods/<page-id>` 或带 `www` 的同一格式，可带普通查询参数和片段；拒绝其他主机、HTTP、用户信息、自定义端口和编码路径。数字 ID 必须来自当前 `target candidates` 候选，dry-run 和确认时都会查询并确认它仍然未登记、非公开且没有文件组；URL 保留为候选接口不可用或人工明确页面时的后备方式。工具校验 API 返回的页面 ID 与 URL 一致，不会把 URL 内的游戏页面 ID 当成全局 ID。
+
+`--mod` 只允许出现在尚未绑定目录的首次 update-file dry-run，确认调用和 update-info 均不接受。dry-run 只把拟绑定的页面、游戏、目录标识及来源写入 `plan.registration`，不写 `modconfig.json`，不保存原始 URL/查询参数。Agent 必须连同文件发布计划一起审查绑定。确认时使用同一请求和摘要，从计划恢复目标；复查本地目录、远端身份/候选资格、包内容及文件状态后，以本地互斥锁和原子替换保存绑定，然后开始远端上传。原独立登记命令已删除。
+
+已有目录绑定时，即使 ID 相同也拒绝传入 `--mod`；目录键或全局 ID 已存在时禁止覆盖或重复登记。首次计划确认前若有其他任务完成登记，返回 TARGET_EXISTS，须去掉 --mod 重新 dry-run。绑定保存与远端上传不是同一个事务：保存后上传失败时保留绑定和回执，不能把已有绑定视为上传成功，也不能删除回执或更换 requestId 重试。
 
 `inspect` 必须且只能选择统一的 `--mod` 或 `--mod-directory`。`--mod-directory` 由工具内部查绑定，输出 `binding`（目录键、INI 名称、登记时的页面名称、游戏域名及各 ID）和 `target`（远端文件及全部版本历史），仅返回当前目录的绑定。`--mod` 为纯数字时按全局 v3 ID 处理，为官方页面 URL 时先解析；URL 结果还输出不含原始 URL/查询参数的 `resolution`。直接按 ID/URL 查询不读取本地绑定，也不输出 `binding`。只读请求成功不代表具有发布权限，实际权限由 Nexus 写接口判定。仅支持上表命令的写法，不提供连字符形式的 target 命令别名。
 
 ### 面向调用 Agent 的首次登记流程
 
-调用 `update-file` 或 `update-info` 时只传完整 `modDirectory`。绑定已存在时工具直接找到固定全局 ID，不需要 Agent 记住名称、目录键或 ID，也不得重复发现或登记。收到 `TARGET_NOT_FOUND` 时，调用 Agent 必须先运行 `target candidates`，不得立即要求用户提供 URL。Agent 应结合当前任务中的游戏、项目含义、目录名、`modinfo.ini` 名称以及候选的游戏和页面名称判断：只有一个合理候选时，可自行执行 `target add --mod-directory <full-path> --mod <candidate-modId>`；禁止仅按列表顺序、最新页面或单一字符串相似度选择。存在多个合理候选或证据不足时，才向用户列出安全的候选信息并核实。登记后仍必须执行正常的 `update-file --dry-run` 并核对目标；官方候选接口不可用时才退回明确的官方页面 URL。
+调用 `update-file` 或 `update-info` 时在请求中只传完整 `modDirectory`。绑定已存在时工具直接找到固定全局 ID，不需要 Agent 记住名称、目录键或 ID，也不得传 --mod 重复发现或登记。首次 update-file 收到 `TARGET_NOT_FOUND` 或 `MODCONFIG_MISSING` 时，调用 Agent 必须先运行 `target candidates`，不得立即要求用户提供 URL。Agent 应结合当前任务中的游戏、项目含义、目录名、`modinfo.ini` 名称以及候选的游戏和页面名称判断：只有一个合理候选时，可使用同一请求执行 `update-file --request <JSON> --dry-run --mod <candidate-modId>`；禁止仅按列表顺序、最新页面或单一字符串相似度选择。存在多个合理候选或证据不足时，才向用户列出安全的候选信息并核实。审核计划后通过 --confirm 完成绑定和上传；官方候选接口不可用时才退回明确的官方页面 URL。update-info 只用于已绑定目录，不能单独建立首次绑定。
 
-dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。计划里的 `request.operation` 由工具根据命令生成，调用方不填写。`update-file` 计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数及启用时的 `rootDirectory`）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。调用任务检查这些内容、ZIP 顶层目录及拟发布的文件说明/changelog。`update-info` 计划包含规范化请求及完整页面正文，不创建压缩包。两者的 dry-run 远端传输层都仅允许 GET，不发送修改或创建上传会话。
+dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。计划里的 `request.operation` 由工具根据命令生成，调用方不填写。`update-file` 计划包含规范化请求、远端文件历史、`package`（INI 名称/版本、ZIP 名称/大小、自动计算的 SHA-256、文件数及启用时的 `rootDirectory`）以及 `intent`（自动动作、目标 fileId、显示名称与分类）。首次绑定时还包含 `registration`，其中 source 为 candidate 或 url，target 包含拟绑定的页面名称、游戏域名、各 ID、目录键和 INI 名称；后续更新不包含它。该绑定方案也受计划摘要保护。调用任务检查这些内容、ZIP 顶层目录及拟发布的文件说明/changelog。`update-info` 计划包含规范化请求及完整页面正文，不创建压缩包。两者的 dry-run 远端传输层都仅允许 GET，不发送修改或创建上传会话。
 
 计划由工具自动保存在自身目录的 `.nexus-state/plans/<requestId>/<planSha256>.plan.json`，调用方不指定路径，也不传计划 ID；`--plan` 参数已移除。同一个 requestId 可有多次 dry-run 记录，每份以完整摘要区分，已有计划不覆盖。计划不含凭据/签名 URL，但含本地源路径和拟发布内容，整个状态目录被 Git 忽略。计划有效期为 15 分钟。
 
@@ -147,14 +161,31 @@ dry-run 的 JSON 包含 `status: dry_run_ok`、完整 `plan` 和 `planSha256`。
 ```powershell
 pwsh -NoProfile -File $tool update-file `
   --request 'E:\MyRelease\release.json' `
-  --execute --confirm '<planSha256>'
+  --confirm '<planSha256>'
 
 pwsh -NoProfile -File $tool update-info `
   --request 'E:\MyRelease\update-info.json' `
-  --execute --confirm '<planSha256>'
+  --confirm '<planSha256>'
 ```
 
 `--confirm` 必须原样使用 dry-run 返回的完整小写 `planSha256`。工具重新读取请求，用规范化 requestId 和该摘要精确定位并校验已保存计划；不会选取最新计划、扫描其他请求或使用外部计划文件。计划不存在返回 `PLAN_NOT_FOUND`，摘要不合法或内容被改动返回 `PLAN_CONFIRMATION`；均在远端写入前停止。摘要不是要求调用方计算压缩包摘要，也不代替发布授权。没有交互提示、默认执行模式、`--yes` 或 `--force`。
+
+`--dry-run` 与 `--confirm <planSha256>` 必须且只能选择一个；传入确认摘要即明确请求执行。`--execute` 已移除，继续传入会报未知参数。两者都不传、同时传入或确认参数缺少值时，均在读取凭据和访问网络前拒绝。
+
+### 上传步骤与调用接口
+
+| 步骤 | 调用接口 | 说明 |
+| --- | --- | --- |
+| 准备发布目录和请求 | 无需调用工具接口 | 目录根部提供 modinfo.ini，准备干净内容；请求使用新 requestId 和完整 modDirectory |
+| 生成发布计划 | `update-file --request <JSON> --dry-run` | 自动查绑定、打包、检查远端并返回计划摘要，只向远端发送 GET |
+| 缺少绑定时获取候选 | `target candidates` | 仅在上述调用返回 TARGET_NOT_FOUND / MODCONFIG_MISSING 时使用，由 Agent 选择可确认的页面 |
+| 首次提出绑定 | `update-file --request <同一JSON> --dry-run --mod <ID或URL>` | 重新生成含首次绑定方案的计划；此时不保存绑定 |
+| 审查计划 | 无需额外接口 | 审核目标 modId、ZIP 结构、版本、自动动作及拟发布文本，保留 planSha256 |
+| 上传发布 | `update-file --request <同一JSON> --confirm <planSha256>` | 复核计划、重新打包并复查远端；首次保存已确认绑定，再分片上传、创建/更新 Main File、读回验证后追加可选 changelog |
+| 成功后收尾 | 无需额外接口 | 返回成功回执及 cleanup 统计，自动清理符合条件的旧计划并退出 |
+| 异常核对 | `inspect --mod-directory <full-path>` 或 `inspect --mod <全局ID或URL>` | 配合回执核对远端文件历史；正常发布不要求额外调用 inspect，退出码 4 禁止盲目重试 |
+
+后续文件更新复用绑定，通常只需要一次 dry-run 和一次带确认摘要的调用。若还要修改页面正文，另建具有新 requestId 的 update-info 请求，先调用 `update-info --request <JSON> --dry-run`，审核完整正文后调用 `update-info --request <同一JSON> --confirm <planSha256>`。
 
 成功执行后，输出还包含 `cleanup`，记录删除计划数、删除空目录数、保留计划数及清理失败项数。存在无法清理的项时附带 `warningCode: CLEANUP_INCOMPLETE`；发布仍保持 `status: success` 和退出码 0，不能因此重新上传或重新修改正文。
 
@@ -175,7 +206,7 @@ dry-run 会把派生的 `directoryKey` 及当时解析出的全局 `modId` 一�
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 成功：`candidates` / `added` / `dry_run_ok` / `inspected` / `success` |
+| 0 | 成功：`candidates` / `dry_run_ok` / `inspected` / `success` |
 | 2 | 输入、校验或不支持的操作；修正具体问题，不能绕过防护 |
 | 3 | 网络/API/环境错误；仅在确认未开始写入后排查 |
 | 4 | 部分完成或结果不确定，核对回执及远端，禁止直接重试 |
@@ -189,7 +220,7 @@ dry-run 会把派生的 `directoryKey` 及当时解析出的全局 `modId` 一�
 
 ## 文件保留与清理
 
-每次 `update-file --execute` 或 `update-info --execute` 成功后，工具顺带清理旧计划，完成后退出，不需要常驻进程。dry-run、只读查询及失败的发布不触发清理。计划的 15 分钟有效期与一个月的清理保留期分别计算。
+每次 `update-file --confirm <planSha256>` 或 `update-info --confirm <planSha256>` 成功后，工具顺带清理旧计划，完成后退出，不需要常驻进程。dry-run、只读查询及失败的发布不触发清理。计划的 15 分钟有效期与一个月的清理保留期分别计算。
 
 | 文件 | 当前清理行为 | 建议 |
 | --- | --- | --- |

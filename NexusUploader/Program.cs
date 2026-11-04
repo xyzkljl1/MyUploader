@@ -39,7 +39,7 @@ internal static class Program
         var firstFlag = 1;
         if (command == "target")
         {
-            Guard.Require(args.Length > 1 && args[1] is "add" or "candidates", "CLI", "target 必须指定 add 或 candidates。");
+            Guard.Require(args.Length > 1 && args[1] == "candidates", "CLI", "target 只支持 candidates；首次绑定请使用 update-file --dry-run --mod。");
             command = "target-" + args[1];
             firstFlag = 2;
         }
@@ -48,7 +48,7 @@ internal static class Program
         {
             var name = args[i];
             Guard.Require(!flags.ContainsKey(name), "CLI_DUPLICATE", "命令行含重复参数。");
-            Guard.Require(ValueFlags.Contains(name) || name is "--dry-run" or "--execute", "CLI", "未知参数；不接受 API key、--yes 或 --force。");
+            Guard.Require(ValueFlags.Contains(name) || name == "--dry-run", "CLI", "未知参数；不接受 API key、--yes 或 --force。");
             var value = "true";
             if (ValueFlags.Contains(name))
             {
@@ -60,21 +60,22 @@ internal static class Program
         var allowed = command switch
         {
             "inspect" => new[] { "--mod", "--mod-directory" },
-            "target-add" => new[] { "--mod-directory", "--mod" },
+            "update-file" => new[] { "--request", "--confirm", "--dry-run", "--mod" },
             "target-candidates" => Array.Empty<string>(),
-            _ => new[] { "--request", "--confirm", "--dry-run", "--execute" }
+            _ => new[] { "--request", "--confirm", "--dry-run" }
         };
         Guard.Require(flags.Keys.All(allowed.Contains), "CLI", "命令包含不适用的参数。");
         if (command is "update-file" or "update-info")
         {
             Required(flags, "--request");
-            Guard.Require(flags.ContainsKey("--dry-run") ^ flags.ContainsKey("--execute"), "CLI_MODE", "必须且只能选择 --dry-run 或 --execute。");
-            Guard.Require(flags.ContainsKey("--execute") == flags.ContainsKey("--confirm"), "CLI_MODE", "执行必须提供 --confirm；dry-run 不接受确认参数。");
+            Guard.Require(flags.ContainsKey("--dry-run") ^ flags.ContainsKey("--confirm"), "CLI_MODE", "必须且只能选择 --dry-run 或 --confirm <planSha256>；不提供默认执行模式。");
+            if (flags.ContainsKey("--confirm")) Required(flags, "--confirm");
+            Guard.Require(!flags.ContainsKey("--mod") || flags.ContainsKey("--dry-run"),
+                "CLI_MODE", "--mod 只用于首次 update-file --dry-run；确认执行时从计划读取绑定，不接受 --mod。");
         }
         else if (command == "inspect")
             Guard.Require(new[] { "--mod", "--mod-directory" }.Count(flags.ContainsKey) == 1,
                 "CLI", "inspect 必须且只能提供 --mod 或 --mod-directory。");
-        else if (command == "target-add") { Required(flags, "--mod-directory"); Required(flags, "--mod"); }
         return (command, flags);
     }
 
@@ -111,20 +112,21 @@ internal static class Program
         if (args.Length == 0 || args is ["--help"] or ["-h"])
         {
             Console.WriteLine("""
-                NexusUploader 1.7 — automation CLI (.NET 8, JSON stdout)
+                NexusUploader 1.9 — automation CLI (.NET 8, JSON stdout)
                 Read AGENTS.md and README.md before publishing.
 
                 target candidates
-                target add --mod-directory <full local mod directory> --mod <global Nexus v3 ID | Nexus mod page URL>
                 inspect (--mod <global Nexus v3 ID | Nexus mod page URL> | --mod-directory <full local mod directory>)
-                update-file --request <JSON> --dry-run
-                update-file --request <same JSON> --execute --confirm <planSha256>
+                update-file --request <JSON> --dry-run [--mod <candidate global ID | Nexus mod page URL>]
+                update-file --request <same JSON> --confirm <planSha256>
                 update-info --request <JSON> --dry-run
-                update-info --request <same JSON> --execute --confirm <planSha256>
+                update-info --request <same JSON> --confirm <planSha256>
 
                 update-file request: requestId, modDirectory; optional includeRootDirectory (default true), description/changelog.
                 update-info request: requestId, modDirectory, description (full mod page BBCode).
                 inspect --mod-directory returns the registered binding plus remote file/version history.
+                First upload: --mod is allowed only for an unbound directory; dry-run proposes a binding, confirmation saves it.
+                Mode: exactly one of --dry-run or --confirm <planSha256>; no default mode or --execute option.
                 Package: reads modinfo.ini name/version, creates ZIP, computes hash automatically.
                 Main Files: none -> create; one -> update; multiple -> error.
                 Dry-run: read-only remote checks and local plan creation; update-file also builds a temporary package.
@@ -149,25 +151,6 @@ internal static class Program
             using var api = new NexusApi(credentials.ApiKey, readOnly: true);
             var candidates = await api.CandidatesAsync(registered, ct);
             Console.WriteLine(Json.Serialize(new { status = "candidates", candidates }));
-            return 0;
-        }
-        if (command == "target-add")
-        {
-            var mod = flags["--mod"];
-            Guard.PublicText(mod, credentials.ApiKey);
-            using var api = new NexusApi(credentials.ApiKey, readOnly: true);
-            ModResolution resolution;
-            if (IsNumeric(mod))
-            {
-                Guard.Id(mod);
-                var registered = ModRegistry.Load(modConfigPath, allowMissing: true).Targets
-                    .Select(x => x.ModId).ToHashSet(StringComparer.Ordinal);
-                Guard.Require(!registered.Contains(mod), "TARGET_EXISTS", "该全局 modId 已登记；禁止建立重复别名。");
-                resolution = (await api.CandidateAsync(mod, registered, ct)).Resolution;
-            }
-            else resolution = await api.ResolveAsync(Guard.ModUrl(mod), ct);
-            var target = ModRegistry.Add(modConfigPath, flags["--mod-directory"], resolution);
-            Console.WriteLine(Json.Serialize(new { status = "added", target }));
             return 0;
         }
         if (command == "inspect")
@@ -204,17 +187,17 @@ internal static class Program
         {
             var input = Guard.Validate(Json.Read<UpdateFileInput>(requestPath),
                 Path.GetDirectoryName(requestPath)!, credentials.ApiKey);
-            var request = ModRegistry.Bind(input, modConfigPath);
             if (dryRun)
             {
-                var plan = await Planner.PrepareAsync(request, client, credentials.ApiKey, ct);
+                var plan = await FileWorkflow.PrepareAsync(input, flags.GetValueOrDefault("--mod"),
+                    modConfigPath, client, credentials.ApiKey, ct);
                 var planSha256 = PlanStore.Save(stateDirectory, plan);
                 Console.WriteLine(Json.Serialize(new { status = "dry_run_ok", planSha256, plan }));
             }
             else
             {
-                var plan = PlanStore.Read<Plan>(stateDirectory, request.RequestId, flags["--confirm"]);
-                var receipt = await Publisher.ExecuteAsync(plan, request, flags["--confirm"], client,
+                var plan = PlanStore.Read<Plan>(stateDirectory, input.RequestId, flags["--confirm"]);
+                var receipt = await FileWorkflow.ExecuteAsync(input, plan, flags["--confirm"], modConfigPath, client,
                     credentials.ApiKey, stateDirectory, ct);
                 Console.WriteLine(Json.Serialize(CompletePublication(receipt, stateDirectory)));
             }

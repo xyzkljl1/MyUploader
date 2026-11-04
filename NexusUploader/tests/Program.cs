@@ -28,8 +28,7 @@ internal static class Tests
                 Check(!inspect.Flags.ContainsKey("--config"));
                 var inspectUrl = App.Parse(["inspect", "--mod", "https://www.nexusmods.com/game/mods/1"]);
                 Check(inspectUrl.Flags.ContainsKey("--mod"));
-                var targetAdd = App.Parse(["target", "add", "--mod-directory", @"E:\Games\Game\FixtureMod", "--mod", "https://www.nexusmods.com/game/mods/1"]);
-                Check(targetAdd.Command == "target-add");
+                Reject(() => App.Parse(["target", "add", "--mod-directory", @"E:\Games\Game\FixtureMod", "--mod", "https://www.nexusmods.com/game/mods/1"]), "CLI");
                 Check(App.Parse(["target", "candidates"]).Command == "target-candidates");
                 Reject(() => App.Parse(["target", "list"]), "CLI");
                 Reject(() => App.Parse(["target-add", "--mod-directory", @"E:\Games\Game\FixtureMod", "--mod", "1"]), "CLI");
@@ -47,12 +46,22 @@ internal static class Tests
                 Check(!update.Flags.ContainsKey("--config") && !update.Flags.ContainsKey("--plan"));
                 var updateInfo = App.Parse(["update-info", "--request", "r", "--dry-run"]);
                 Check(updateInfo.Command == "update-info");
+                Check(App.Parse(["update-file", "--request", "r", "--dry-run", "--mod", "20000"]).Flags["--mod"] == "20000");
+                Reject(() => App.Parse(["update-file", "--request", "r", "--confirm", new string('a', 64), "--mod", "20000"]), "CLI_MODE");
+                Reject(() => App.Parse(["update-info", "--request", "r", "--dry-run", "--mod", "20000"]), "CLI");
                 foreach (var command in new[] { "update-file", "update-info" })
                 {
                     Reject(() => App.Parse([command, "--request", "r", "--dry-run", "--plan", "p"]), "CLI");
-                    Reject(() => App.Parse([command, "--request", "r", "--execute"]), "CLI_MODE");
+                    Reject(() => App.Parse([command, "--request", "r"]), "CLI_MODE");
+                    Reject(() => App.Parse([command, "--request", "r", "--execute"]), "CLI");
+                    Reject(() => App.Parse([command, "--request", "r", "--execute", "--confirm", new string('a', 64)]), "CLI");
                     Reject(() => App.Parse([command, "--request", "r", "--dry-run", "--confirm", "hash"]), "CLI_MODE");
-                    Check(App.Parse([command, "--request", "r", "--execute", "--confirm", new string('a', 64)]).Flags.ContainsKey("--confirm"));
+                    Reject(() => App.Parse([command, "--request", "r", "--confirm"]), "CLI");
+                    Reject(() => App.Parse([command, "--request", "r", "--confirm", " "]), "CLI");
+                    Reject(() => App.Parse([command, "--request", "r", "--confirm", "hash", "--confirm", "hash"]), "CLI_DUPLICATE");
+                    var confirmed = App.Parse([command, "--request", "r", "--confirm", new string('a', 64)]);
+                    Check(confirmed.Flags.ContainsKey("--confirm") && !confirmed.Flags.ContainsKey("--dry-run") &&
+                        !confirmed.Flags.ContainsKey("--execute"));
                 }
                 Check(Path.GetFileName(App.DefaultConfigPath()) == "config.json");
                 Reject(() => Json.Parse<UpdateFileInput>("{\"modDirectory\":\"x\",\"ModDirectory\":\"y\"}"), "DUPLICATE_JSON");
@@ -108,6 +117,111 @@ internal static class Tests
                 await RejectAsync(() => api.CandidateAsync("12345", new HashSet<string>(StringComparer.Ordinal), default),
                     "TARGET_NOT_CANDIDATE");
                 Check(mock.Calls.All(x => x.Method == "GET"));
+            });
+            await Run("first-upload dry-run proposes candidate or URL bindings without saving the registry", async () =>
+            {
+                foreach (var mod in new[] { "20000", "https://www.nexusmods.com/skyrimspecialedition/mods/12604?tab=files#content" })
+                {
+                    var (request, mock) = Setup(); var input = FileInput(request);
+                    var registry = Path.Combine(State(), "modconfig.json");
+                    using var api = new NexusApi(Key, true, mock, new StorageMock());
+                    var plan = await FileWorkflow.PrepareAsync(input, mod, registry, api, Key, default);
+                    var proposed = plan.Registration!;
+                    Check(proposed.Source == (mod == "20000" ? "candidate" : "url") &&
+                        proposed.Target.ModId == plan.Request.ModId && proposed.Target.DirectoryKey == request.DirectoryKey);
+                    Check(plan.Intent.Action == (mod == "20000" ? "create" : "update") && !File.Exists(registry) &&
+                        !File.Exists(registry + ".lock") && mock.Calls.All(x => x.Method == "GET"));
+                    Check(!Json.Serialize(plan).Contains("tab=files"));
+                    var state = State(); var hash = PlanStore.Save(state, plan);
+                    var stored = PlanStore.Read<Plan>(state, input.RequestId, hash);
+                    Check(stored.Registration == proposed && FileWorkflow.BindForConfirmation(input, stored, registry).ModId == proposed.Target.ModId);
+                    var altered = plan with { Registration = proposed with { Source = proposed.Source == "url" ? "candidate" : "url" } };
+                    Reject(() => Planner.CheckPlan(altered, plan.Request, Json.Hash(altered)), "PLAN_CONFIRMATION");
+                }
+            });
+            await Run("confirmed first upload saves its verified binding before remote writes and later reuses it", async () =>
+            {
+                foreach (var candidate in new[] { false, true })
+                {
+                    var (request, mock) = Setup(); var input = FileInput(request);
+                    mock.FixtureIsCandidate = candidate; mock.Empty = candidate;
+                    var registry = Path.Combine(State(), "modconfig.json"); var state = State();
+                    var mod = candidate ? "12345" : "https://www.nexusmods.com/skyrimspecialedition/mods/12604";
+                    using var readOnly = new NexusApi(Key, true, mock, new StorageMock());
+                    var plan = await FileWorkflow.PrepareAsync(input, mod, registry, readOnly, Key, default);
+                    var hash = PlanStore.Save(state, plan);
+                    mock.BeforeUpload = () => Check(File.Exists(registry) &&
+                        ModRegistry.Find(registry, input.ModDirectory).ModId == "12345");
+                    using var api = new NexusApi(Key, false, mock, new StorageMock());
+                    var receipt = await FileWorkflow.ExecuteAsync(input, PlanStore.Read<Plan>(state, input.RequestId, hash),
+                        hash, registry, api, Key, state, default);
+                    Check(receipt.Status == "success" && receipt.ModId == "12345" &&
+                        ModRegistry.Find(registry, input.ModDirectory).PageName == "Fixture Mod");
+                    var calls = mock.Calls.Count;
+                    await RejectAsync(() => FileWorkflow.PrepareAsync(input, mod, registry, readOnly, Key, default), "TARGET_EXISTS");
+                    Check(mock.Calls.Count == calls);
+                    File.WriteAllText(Path.Combine(input.ModDirectory, "modinfo.ini"), "name=Test Mod\nversion=3.0");
+                    var next = await FileWorkflow.PrepareAsync(input with { RequestId = Guid.NewGuid().ToString("D") },
+                        null, registry, readOnly, Key, default);
+                    Check(next.Registration is null && next.Request.ModId == "12345" && next.Intent.Action == "update" &&
+                        mock.Calls.Skip(calls).All(x => x.Path != "/v3/team-mods" && !x.Path.StartsWith("/v3/games/")));
+                }
+            });
+            await Run("registration conflicts after dry-run never overwrite another binding", async () =>
+            {
+                foreach (var sameDirectory in new[] { true, false })
+                {
+                    var (request, mock) = Setup(); var input = FileInput(request);
+                    var registry = Path.Combine(State(), "modconfig.json");
+                    using var api = new NexusApi(Key, false, mock, new StorageMock());
+                    var plan = await FileWorkflow.PrepareAsync(input,
+                        "https://www.nexusmods.com/skyrimspecialedition/mods/12604", registry, api, Key, default);
+                    var (other, _) = Setup();
+                    ModRegistry.Add(registry, sameDirectory ? request.ModDirectory : other.ModDirectory,
+                        new("skyrimspecialedition", "12604", "12345", "1704", "Other binding"));
+                    var snapshot = File.ReadAllText(registry);
+                    await RejectAsync(() => FileWorkflow.ExecuteAsync(input, plan, Json.Hash(plan), registry, api, Key, State(), default), "TARGET_EXISTS");
+                    Check(File.ReadAllText(registry) == snapshot && mock.Calls.All(x => x.Method == "GET"));
+                }
+            });
+            await Run("first-binding confirmation rechecks content eligibility identity expiration and hash", async () =>
+            {
+                foreach (var change in new[] { "content", "page", "candidate", "expired", "hash" })
+                {
+                    var (request, mock) = Setup(); var input = FileInput(request);
+                    mock.FixtureIsCandidate = change == "candidate"; mock.Empty = mock.FixtureIsCandidate;
+                    var registry = Path.Combine(State(), "modconfig.json"); var state = State();
+                    using var api = new NexusApi(Key, false, mock, new StorageMock());
+                    var plan = await FileWorkflow.PrepareAsync(input, mock.FixtureIsCandidate ? "12345" :
+                        "https://www.nexusmods.com/skyrimspecialedition/mods/12604", registry, api, Key, default);
+                    switch (change)
+                    {
+                        case "content": File.WriteAllText(Path.Combine(input.ModDirectory, "mod.lua"), "changed source"); break;
+                        case "page": mock.ResolvedPageName = "Changed page"; break;
+                        case "candidate": mock.CandidateStatus = "published"; break;
+                        case "expired": plan = plan with { CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-20), ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-5) }; break;
+                    }
+                    var code = change switch { "content" => "PACKAGE_CHANGED", "page" => "BINDING_CHANGED",
+                        "candidate" => "TARGET_NOT_CANDIDATE", "expired" => "PLAN_EXPIRED", _ => "PLAN_CONFIRMATION" };
+                    await RejectAsync(() => FileWorkflow.ExecuteAsync(input, plan, change == "hash" ? new string('0', 64) : Json.Hash(plan),
+                        registry, api, Key, state, default), code);
+                    Check(!File.Exists(registry) && !File.Exists(Path.Combine(state, input.RequestId + ".receipt.json")) &&
+                        mock.Calls.All(x => x.Method == "GET"));
+                }
+            });
+            await Run("failed first upload retains its binding and receipt and cannot be retried", async () =>
+            {
+                var (request, mock) = Setup(); var input = FileInput(request); mock.CancelUpload = true;
+                var registry = Path.Combine(State(), "modconfig.json"); var state = State();
+                using var api = new NexusApi(Key, false, mock, new StorageMock());
+                var plan = await FileWorkflow.PrepareAsync(input,
+                    "https://www.nexusmods.com/skyrimspecialedition/mods/12604", registry, api, Key, default);
+                await RejectAsync(() => FileWorkflow.ExecuteAsync(input, plan, Json.Hash(plan), registry, api, Key, state, default), "PARTIAL_OR_UNCERTAIN");
+                Check(ModRegistry.Find(registry, input.ModDirectory).ModId == "12345" &&
+                    Json.Read<Receipt>(Path.Combine(state, input.RequestId + ".receipt.json")).Status == "uncertain");
+                var calls = mock.Calls.Count;
+                await RejectAsync(() => FileWorkflow.ExecuteAsync(input, plan, Json.Hash(plan), registry, api, Key, state, default), "ALREADY_ATTEMPTED");
+                Check(mock.Calls.Count == calls);
             });
             await Run("directory identity uses only the final three segments", () =>
             {
@@ -748,6 +862,11 @@ internal static class Tests
         try { await action(); throw new Exception(); } catch (SafeException e) { Check(e.Code == code); }
     }
     private static string State() { var path = Path.Combine(root, Guid.NewGuid().ToString()); Directory.CreateDirectory(path); return path; }
+    private static UpdateFileInput FileInput(Request request) => new()
+    {
+        RequestId = request.RequestId, ModDirectory = request.ModDirectory, IncludeRootDirectory = request.IncludeRootDirectory,
+        Description = request.Description, Changelog = request.Changelog
+    };
     private static (UpdateInfoPlan Plan, string Path) SaveCleanupPlan(string state, DateTimeOffset expiry)
     {
         var (request, _) = SetupInfo();
@@ -781,6 +900,9 @@ internal static class Tests
         public List<(string Method, string Path)> Calls { get; } = [];
         public string OldVersion = "1.0", UploadFilename = "", PublishedVersion = "", PublishedName = "";
         public string ResponseFileId = "100", PublishedOwnerFileId = "100";
+        public string ResolvedPageName = "Fixture Mod", CandidateStatus = "not_published";
+        public bool FixtureIsCandidate;
+        public Action? BeforeUpload;
         public string? Description, PageDescription;
         public bool Empty, Published, FailChangelog, CancelUpload, DriftAfterUpload, FailReadback, InfoUpdated, FailInfoUpdate;
         public int ChangelogCalls;
@@ -796,22 +918,22 @@ internal static class Tests
                 {
                     data = new
                     {
-                        mods = new object[]
+                        mods = FixtureIsCandidate ? new object[] { TeamMod("12345", "12604", ResolvedPageName, CandidateStatus, "owner") } : new object[]
                         {
                             TeamMod("12345", "12604", "Published Mod", "published", "owner"),
-                            TeamMod("20000", "200", "New Private Page", "not_published", "owner"),
+                            TeamMod("20000", "200", "New Private Page", CandidateStatus, "owner"),
                             TeamMod("30000", "300", "Hidden Existing Mod", "hidden", "contributor"),
                             TeamMod("40000", "400", "Moderated Draft", "under_moderation", "owner")
                         }
                     },
-                    meta = new { page = 1, page_size = 100, total_count = 4 }
+                    meta = new { page = 1, page_size = 100, total_count = FixtureIsCandidate ? 1 : 4 }
                 });
             if (path == "/v3/mods/20000/files" && request.Method == HttpMethod.Get)
                 return Data(new { mod_files = Array.Empty<object>() });
             if (path == "/v3/mods/30000/files" && request.Method == HttpMethod.Get)
                 return Data(new { mod_files = new[] { new { id = "301", name = "Existing", is_active = true, versions_count = 1 } } });
             if (path == "/v3/games/skyrimspecialedition/mods/12604" && request.Method == HttpMethod.Get)
-                return Data(new { id = "12345", game_scoped_id = "12604", game_id = "1704", name = "Fixture Mod" });
+                return Data(new { id = "12345", game_scoped_id = "12604", game_id = "1704", name = ResolvedPageName });
             if (path == "/v3/mods/12345/files")
             {
                 if (Published && FailReadback) return Response(new { error = Key }, 503);
@@ -833,6 +955,7 @@ internal static class Tests
                 return Data(new { versions = new[] { new { id = "102", file = new { id = PublishedOwnerFileId }, name = PublishedName, version = PublishedVersion, category = "main", is_primary = true } } });
             if (path == "/v3/uploads/multipart")
             {
+                BeforeUpload?.Invoke();
                 if (CancelUpload) throw new OperationCanceledException("fake exception with " + Key);
                 using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
                 size = body.RootElement.GetProperty("size_bytes").GetInt64();
